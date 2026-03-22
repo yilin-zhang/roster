@@ -16,11 +16,42 @@
 (require 'seq)
 (require 'project)
 (require 'term)
+(require 'tabulated-list)
 
 (defgroup ocman nil
   "OpenCode session manager."
   :group 'tools
   :prefix "ocman-")
+
+(defface ocman-list-title-face
+  '((t :inherit default :weight bold))
+  "Face for session titles in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-active-face
+  '((t :inherit success))
+  "Face for active session state in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-archived-face
+  '((t :inherit shadow :slant italic))
+  "Face for archived session state in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-project-face
+  '((t :inherit font-lock-builtin-face))
+  "Face for project names in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-directory-face
+  '((t :inherit font-lock-comment-face))
+  "Face for directory paths in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-time-face
+  '((t :inherit font-lock-comment-face :slant italic))
+  "Face for timestamps in `ocman' lists."
+  :group 'ocman)
 
 (defcustom ocman-opencode-db-path
   (expand-file-name "~/.local/share/opencode/opencode.db")
@@ -39,8 +70,22 @@ The function is called with two args: DIRECTORY and COMMAND."
   :type 'function
   :group 'ocman)
 
+(defcustom ocman-list-include-archived t
+  "Whether `ocman-list-sessions' shows archived sessions by default."
+  :type 'boolean
+  :group 'ocman)
+
 (defvar ocman--completion-directory-map nil
   "Alist from displayed candidate title to session directory.")
+
+(defvar ocman-list-buffer-name "*ocman*"
+  "Buffer name used for the main `ocman' session list.")
+
+(defvar-local ocman-list-source-function nil
+  "Function returning sessions for the current `ocman' list buffer.")
+
+(defvar-local ocman-list-show-archived ocman-list-include-archived
+  "Whether the current `ocman' list buffer shows archived sessions.")
 
 (defun ocman-open-in-emacs-terminal (directory command)
   "Open terminal in Emacs for DIRECTORY and run COMMAND.
@@ -248,6 +293,31 @@ Return non-nil when one row was updated."
       (format "%s [archived]" (plist-get session :title))
     (plist-get session :title)))
 
+(defun ocman--session-state (session)
+  "Return display state for SESSION."
+  (if (ocman--session-archived-p session)
+      "archived"
+    "active"))
+
+(defun ocman--format-time-millis (millis)
+  "Format MILLIS since epoch for list display."
+  (if (and millis (> millis 0))
+      (format-time-string "%Y-%m-%d %H:%M"
+                          (seconds-to-time (/ millis 1000.0)))
+    ""))
+
+(defun ocman--state-face (session)
+  "Return the face used for SESSION state." 
+  (if (ocman--session-archived-p session)
+      'ocman-list-archived-face
+    'ocman-list-active-face))
+
+(defun ocman--session-by-id (session-id)
+  "Return root session plist for SESSION-ID, or nil when missing."
+  (seq-find (lambda (session)
+              (string= (plist-get session :id) session-id))
+            (ocman--load-sessions)))
+
 (defun ocman--run-command (directory command)
   "Run COMMAND in DIRECTORY and return its trimmed stdout.
 Signal a `user-error' when the command exits unsuccessfully."
@@ -348,6 +418,231 @@ otherwise return `default-directory'."
              ocman-opencode-command
              (shell-quote-argument session-id)))))
 
+(defun ocman--list-sessions ()
+  "Return sessions for the current `ocman' list buffer."
+  (unless ocman-list-source-function
+    (user-error "No session source configured for this ocman buffer"))
+  (let ((sessions (funcall ocman-list-source-function)))
+    (if ocman-list-show-archived
+        sessions
+      (ocman--active-sessions sessions))))
+
+(defun ocman--list-entry (session)
+  "Build one tabulated list entry for SESSION."
+  (let ((directory (plist-get session :directory)))
+    (list (plist-get session :id)
+          (vector
+           (concat "  " (propertize (plist-get session :title) 'face 'ocman-list-title-face))
+           (propertize (upcase (ocman--session-state session)) 'face (ocman--state-face session))
+           (propertize (file-name-nondirectory (directory-file-name directory))
+                       'face 'ocman-list-project-face)
+           (propertize directory 'face 'ocman-list-directory-face)
+           (propertize (ocman--format-time-millis (plist-get session :time-updated))
+                       'face 'ocman-list-time-face)))))
+
+(defun ocman--list-refresh ()
+  "Refresh `tabulated-list-entries' for the current `ocman' buffer."
+  (setq tabulated-list-entries
+        (mapcar #'ocman--list-entry (ocman--list-sessions))))
+
+(defun ocman--session-at-point ()
+  "Return the session at point in an `ocman' list buffer."
+  (let ((session-id (tabulated-list-get-id)))
+    (unless session-id
+      (user-error "No session on this line"))
+    (or (ocman--session-by-id session-id)
+        (user-error "Session %s no longer exists" session-id))))
+
+(defun ocman-list-refresh ()
+  "Refresh the current `ocman' list buffer."
+  (interactive)
+  (revert-buffer))
+
+(defun ocman-list-toggle-archived ()
+  "Toggle whether archived sessions are shown in the current list."
+  (interactive)
+  (setq ocman-list-show-archived (not ocman-list-show-archived))
+  (tabulated-list-revert)
+  (message "%s archived sessions"
+           (if ocman-list-show-archived "Showing" "Hiding")))
+
+(defun ocman-list-resume ()
+  "Resume the session on the current line."
+  (interactive)
+  (ocman--resume-session (ocman--session-at-point)))
+
+(defun ocman-list-open-directory ()
+  "Open the current session's directory in Dired."
+  (interactive)
+  (dired (plist-get (ocman--session-at-point) :directory)))
+
+(defun ocman-list-rename ()
+  "Rename the session on the current line."
+  (interactive)
+  (when (ocman--rename-session-command (ocman--session-at-point))
+    (tabulated-list-revert)))
+
+(defun ocman-list-toggle-archive ()
+  "Toggle archived state for the session on the current line."
+  (interactive)
+  (let* ((session (ocman--session-at-point))
+         (archived (not (ocman--session-archived-p session))))
+    (when (ocman--set-session-archived-command session archived)
+      (tabulated-list-revert))))
+
+(defun ocman-list-move-directory ()
+  "Move the session on the current line to another project directory."
+  (interactive)
+  (when (ocman--update-session-directory-command (ocman--session-at-point))
+    (tabulated-list-revert)))
+
+(defun ocman-list-delete ()
+  "Delete the session on the current line."
+  (interactive)
+  (let ((line (line-number-at-pos)))
+    (when (ocman--delete-session-command (ocman--session-at-point))
+      (tabulated-list-revert)
+      (goto-char (point-min))
+      (forward-line (max 0 (1- line)))
+      (when (eobp)
+        (forward-line -1)))))
+
+(defun ocman-list-new-session ()
+  "Start a new OpenCode session from the list buffer."
+  (interactive)
+  (ocman--start-new-session-with-directory-prompt))
+
+(defvar ocman-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "RET") #'ocman-list-resume)
+    (define-key map (kbd "e") #'ocman-list-resume)
+    (define-key map (kbd "d") #'ocman-list-delete)
+    (define-key map (kbd "r") #'ocman-list-rename)
+    (define-key map (kbd "a") #'ocman-list-toggle-archive)
+    (define-key map (kbd "R") #'ocman-list-move-directory)
+    (define-key map (kbd "o") #'ocman-list-open-directory)
+    (define-key map (kbd "c") #'ocman-list-new-session)
+    (define-key map (kbd "g") #'ocman-list-refresh)
+    (define-key map (kbd "t") #'ocman-list-toggle-archived)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `ocman-list-mode'.")
+
+(define-derived-mode ocman-list-mode tabulated-list-mode "ocman"
+  "Major mode for managing OpenCode sessions."
+  (setq tabulated-list-format [("Title" 28 t)
+                               ("State" 10 t)
+                               ("Project" 18 t)
+                               ("Directory" 42 t)
+                               ("Updated" 16 t)])
+  (setq tabulated-list-padding 2)
+  (setq tabulated-list-sort-key '("Updated" . nil))
+  (add-hook 'tabulated-list-revert-hook #'ocman--list-refresh nil t)
+  (tabulated-list-init-header))
+
+(defun ocman--open-list-buffer (buffer-name source-function &optional include-archived)
+  "Open an `ocman' list BUFFER-NAME using SOURCE-FUNCTION.
+When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
+  (let ((buffer (get-buffer-create buffer-name)))
+    (with-current-buffer buffer
+      (ocman-list-mode)
+      (setq-local ocman-list-source-function source-function)
+      (setq-local ocman-list-show-archived (if (null include-archived)
+                                               ocman-list-include-archived
+                                             include-archived))
+      (setq-local header-line-format
+                  "RET/e resume, d delete, r rename, a archive, R move, o dired, c create, t archived, g refresh")
+      (tabulated-list-revert))
+    (pop-to-buffer buffer)))
+
+(defun ocman--rename-session-command (session)
+  "Rename SESSION and return non-nil when it changes."
+  (let* ((session-id (plist-get session :id))
+         (old-title (plist-get session :title))
+         (new-title (string-trim
+                     (read-string (format "Rename session (%s): " old-title)
+                                  old-title))))
+    (when (string-empty-p new-title)
+      (user-error "Session title cannot be empty"))
+    (if (string= old-title new-title)
+        (progn
+          (message "Session %s already uses that title" session-id)
+          nil)
+      (unless (ocman--set-session-title session-id new-title)
+        (user-error "No session updated for id %s" session-id))
+      (let ((updated (ocman--session-with-project-worktree session-id)))
+        (unless (and updated
+                     (string= (plist-get updated :title) new-title))
+          (user-error "Session %s failed title verification" session-id))
+        (message "Renamed session %s to %s" session-id new-title)
+        t))))
+
+(defun ocman--set-session-archived-command (session archived)
+  "Set SESSION archived state to ARCHIVED and return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (title (plist-get session :title))
+         (verb (if archived "Archive" "Unarchive")))
+    (when (yes-or-no-p (format "%s OpenCode session '%s' (%s)? " verb title session-id))
+      (unless (ocman--set-session-archived session-id archived)
+        (user-error "No session updated for id %s" session-id))
+      (let ((updated (ocman--session-with-project-worktree session-id)))
+        (unless (and updated
+                     (eq (ocman--session-archived-p updated) archived))
+          (user-error "Session %s failed %s verification" session-id (downcase verb)))
+        (message "%sd session %s" verb session-id)
+        t))))
+
+(defun ocman--delete-session-command (session)
+  "Delete SESSION using the official CLI and return non-nil on success."
+  (let ((session-id (plist-get session :id))
+        (title (plist-get session :title))
+        (directory (plist-get session :directory)))
+    (when (yes-or-no-p (format "Delete OpenCode session '%s' (%s)? " title session-id))
+      (ocman--delete-session session)
+      (message "Deleted session %s from %s" session-id directory)
+      t)))
+
+(defun ocman--update-session-directory-command (session)
+  "Move SESSION to another known OpenCode project directory."
+  (let* ((session-id (plist-get session :id))
+         (old-dir (plist-get session :directory))
+         (old-project-id (plist-get session :project-id))
+         (new-dir (directory-file-name
+                   (expand-file-name
+                    (read-directory-name (format "New directory (current: %s): " old-dir)
+                                         old-dir nil t)))))
+    (unless (file-directory-p new-dir)
+      (user-error "Directory does not exist: %s" new-dir))
+    (let ((target-project (ocman--project-for-directory new-dir)))
+      (unless target-project
+        (user-error
+         (concat
+          "No OpenCode project matches %s. OpenCode only stays consistent when the target "
+          "directory already exists as a project worktree.")
+         new-dir))
+      (let ((new-project-id (plist-get target-project :id)))
+        (if (and (string= old-dir new-dir)
+                 (string= old-project-id new-project-id))
+            (progn
+              (message "Session %s already points to %s" session-id new-dir)
+              nil)
+          (when (yes-or-no-p
+                 (format "Move session %s from %s to %s? " session-id old-dir new-dir))
+            (unless (ocman--move-session-directory session-id new-dir new-project-id)
+              (user-error "No session updated for id %s" session-id))
+            (let ((updated (ocman--session-with-project-worktree session-id)))
+              (unless updated
+                (user-error "Updated session %s could not be reloaded" session-id))
+              (unless (and (string= (plist-get updated :directory) new-dir)
+                           (string= (plist-get updated :project-id) new-project-id)
+                           (string= (or (plist-get updated :project-worktree) "") new-dir))
+                (user-error "Session %s failed post-update consistency checks" session-id))
+              (message
+               "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
+               session-id new-dir)
+              t)))))))
+
 ;;;###autoload
 (defun ocman-update-session-directory ()
   "Safely move a session to another known OpenCode project directory.
@@ -358,41 +653,8 @@ allows targets that already exist in the OpenCode `project' table."
   (let ((sessions (ocman--load-sessions)))
     (unless sessions
       (user-error "No OpenCode sessions found"))
-    (let* ((session (ocman--select-session sessions "Select OpenCode session to move: "))
-           (session-id (plist-get session :id))
-           (old-dir (plist-get session :directory))
-           (old-project-id (plist-get session :project-id))
-           (new-dir (directory-file-name
-                     (expand-file-name
-                      (read-directory-name (format "New directory (current: %s): " old-dir)
-                                           old-dir nil t)))))
-      (unless (file-directory-p new-dir)
-        (user-error "Directory does not exist: %s" new-dir))
-      (let ((target-project (ocman--project-for-directory new-dir)))
-        (unless target-project
-          (user-error
-           (concat
-            "No OpenCode project matches %s. OpenCode only stays consistent when the target "
-            "directory already exists as a project worktree.")
-           new-dir))
-        (let ((new-project-id (plist-get target-project :id)))
-          (if (and (string= old-dir new-dir)
-                   (string= old-project-id new-project-id))
-              (message "Session %s already points to %s" session-id new-dir)
-            (when (yes-or-no-p
-                   (format "Move session %s from %s to %s? " session-id old-dir new-dir))
-              (unless (ocman--move-session-directory session-id new-dir new-project-id)
-                (user-error "No session updated for id %s" session-id))
-              (let ((updated (ocman--session-with-project-worktree session-id)))
-                (unless updated
-                  (user-error "Updated session %s could not be reloaded" session-id))
-                (unless (and (string= (plist-get updated :directory) new-dir)
-                             (string= (plist-get updated :project-id) new-project-id)
-                             (string= (or (plist-get updated :project-worktree) "") new-dir))
-                  (user-error "Session %s failed post-update consistency checks" session-id))
-                (message
-                 "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
-                 session-id new-dir)))))))))
+    (ocman--update-session-directory-command
+     (ocman--select-session sessions "Select OpenCode session to move: "))))
 
 ;;;###autoload
 (defun ocman-rename-session ()
@@ -402,23 +664,8 @@ allows targets that already exist in the OpenCode `project' table."
          (active-sessions (ocman--active-sessions sessions)))
     (unless active-sessions
       (user-error "No active OpenCode sessions found"))
-    (let* ((session (ocman--select-session active-sessions "Select OpenCode session to rename: "))
-           (session-id (plist-get session :id))
-           (old-title (plist-get session :title))
-           (new-title (string-trim
-                       (read-string (format "Rename session (%s): " old-title)
-                                    old-title))))
-      (when (string-empty-p new-title)
-        (user-error "Session title cannot be empty"))
-      (if (string= old-title new-title)
-          (message "Session %s already uses that title" session-id)
-        (unless (ocman--set-session-title session-id new-title)
-          (user-error "No session updated for id %s" session-id))
-        (let ((updated (ocman--session-with-project-worktree session-id)))
-          (unless (and updated
-                       (string= (plist-get updated :title) new-title))
-            (user-error "Session %s failed title verification" session-id))
-          (message "Renamed session %s to %s" session-id new-title))))))
+    (ocman--rename-session-command
+     (ocman--select-session active-sessions "Select OpenCode session to rename: "))))
 
 ;;;###autoload
 (defun ocman-archive-session ()
@@ -428,16 +675,9 @@ allows targets that already exist in the OpenCode `project' table."
          (active-sessions (ocman--active-sessions sessions)))
     (unless active-sessions
       (user-error "No active OpenCode sessions found"))
-    (let* ((session (ocman--select-session active-sessions "Select OpenCode session to archive: "))
-           (session-id (plist-get session :id))
-           (title (plist-get session :title)))
-      (when (yes-or-no-p (format "Archive OpenCode session '%s' (%s)? " title session-id))
-        (unless (ocman--set-session-archived session-id t)
-          (user-error "No session updated for id %s" session-id))
-        (let ((updated (ocman--session-with-project-worktree session-id)))
-          (unless (and updated (ocman--session-archived-p updated))
-            (user-error "Session %s failed archive verification" session-id))
-          (message "Archived session %s" session-id))))))
+    (ocman--set-session-archived-command
+     (ocman--select-session active-sessions "Select OpenCode session to archive: ")
+     t)))
 
 ;;;###autoload
 (defun ocman-unarchive-session ()
@@ -447,16 +687,9 @@ allows targets that already exist in the OpenCode `project' table."
          (archived-sessions (ocman--archived-sessions sessions)))
     (unless archived-sessions
       (user-error "No archived OpenCode sessions found"))
-    (let* ((session (ocman--select-session archived-sessions "Select OpenCode session to unarchive: "))
-           (session-id (plist-get session :id))
-           (title (plist-get session :title)))
-      (when (yes-or-no-p (format "Unarchive OpenCode session '%s' (%s)? " title session-id))
-        (unless (ocman--set-session-archived session-id nil)
-          (user-error "No session updated for id %s" session-id))
-        (let ((updated (ocman--session-with-project-worktree session-id)))
-          (unless (and updated (not (ocman--session-archived-p updated)))
-            (user-error "Session %s failed unarchive verification" session-id))
-          (message "Unarchived session %s" session-id))))))
+    (ocman--set-session-archived-command
+     (ocman--select-session archived-sessions "Select OpenCode session to unarchive: ")
+     nil)))
 
 ;;;###autoload
 (defun ocman-delete-session ()
@@ -465,13 +698,24 @@ allows targets that already exist in the OpenCode `project' table."
   (let ((sessions (ocman--load-sessions)))
     (unless sessions
       (user-error "No OpenCode sessions found"))
-    (let* ((session (ocman--select-session sessions "Select OpenCode session to delete: "))
-           (session-id (plist-get session :id))
-           (title (plist-get session :title))
-           (directory (plist-get session :directory)))
-      (when (yes-or-no-p (format "Delete OpenCode session '%s' (%s)? " title session-id))
-        (ocman--delete-session session)
-        (message "Deleted session %s from %s" session-id directory)))))
+    (ocman--delete-session-command
+     (ocman--select-session sessions "Select OpenCode session to delete: "))))
+
+;;;###autoload
+(defun ocman-list-sessions ()
+  "Open a Dired-like buffer for managing OpenCode sessions."
+  (interactive)
+  (ocman--open-list-buffer ocman-list-buffer-name #'ocman--load-sessions))
+
+;;;###autoload
+(defun ocman-list-project-sessions ()
+  "Open a Dired-like buffer for sessions in the current project scope."
+  (interactive)
+  (let ((scope (ocman--project-scope-directory)))
+    (ocman--open-list-buffer
+     (format "%s<%s>" ocman-list-buffer-name (file-name-nondirectory (directory-file-name scope)))
+     (lambda ()
+       (ocman--project-scoped-sessions (ocman--load-sessions))))))
 
 ;;;###autoload
 (defun ocman-open-session ()
@@ -506,7 +750,6 @@ If no matching session exists, prompt for a directory and start a new one."
 If none exists, prompt for a directory and start a new one."
   (interactive)
   (let* ((sessions (ocman--load-sessions))
-         (scope (ocman--project-scope-directory))
          (scoped-sessions (ocman--active-sessions
                            (ocman--project-scoped-sessions sessions))))
     (if scoped-sessions
