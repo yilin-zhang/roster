@@ -22,6 +22,26 @@
 - `ocman-delete-session`
 - `ocman-update-session-directory`
 
+## Example config
+
+```elisp
+(use-package ocman
+  :ensure nil
+  :load-path "~/.emacs.d/site-lisp/ocman/"
+  :commands (ocman-open-session
+             ocman-open-session-project
+             ocman-open-latest-session-project
+             ocman-rename-session
+             ocman-archive-session
+             ocman-unarchive-session
+             ocman-delete-session
+             ocman-update-session-directory)
+  :custom
+  (ocman-terminal-function (if (eq system-type 'darwin)
+                               #'ocman-open-in-iterm
+                             #'ocman-open-in-emacs-terminal)))
+```
+
 ## Notes
 
 - Session deletion uses `opencode session delete`.
