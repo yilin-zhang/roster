@@ -122,13 +122,13 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
       output)))
 
 (defun ocman--load-sessions ()
-  "Return all OpenCode sessions as a list of plists.
+  "Return root OpenCode sessions as a list of plists.
 Each plist has keys :id, :title, :directory, :project-id,
 :time-updated and :time-archived."
   (let* ((sql (concat
-               "SELECT id, title, directory, project_id, time_updated, "
-               "COALESCE(time_archived, '') "
-               "FROM session ORDER BY time_updated DESC;"))
+                "SELECT id, title, directory, project_id, time_updated, "
+                "COALESCE(time_archived, '') "
+               "FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC;"))
          (output (ocman--sqlite-output sql)))
     (if (string-empty-p output)
         nil
