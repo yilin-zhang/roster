@@ -1,0 +1,29 @@
+# ocman
+
+`ocman` is a small Emacs helper for managing OpenCode sessions.
+
+## Features
+
+- Resume any existing OpenCode session
+- Resume the latest session in the current project
+- Rename sessions
+- Archive and unarchive sessions
+- Delete sessions via the official OpenCode CLI
+- Safely move a session to another known OpenCode project directory
+
+## Commands
+
+- `ocman-open-session`
+- `ocman-open-session-project`
+- `ocman-open-latest-session-project`
+- `ocman-rename-session`
+- `ocman-archive-session`
+- `ocman-unarchive-session`
+- `ocman-delete-session`
+- `ocman-update-session-directory`
+
+## Notes
+
+- Session deletion uses `opencode session delete`.
+- Rename and archive operations currently update the local OpenCode database directly to match OpenCode's internal fields.
+- Directory moves are validated against known OpenCode projects before updating both `session.directory` and `session.project_id`.
