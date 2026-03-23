@@ -59,8 +59,14 @@
              ocman-update-session-directory)
   :custom
   (ocman-terminal-function (if (eq system-type 'darwin)
-                               #'ocman-open-in-iterm
+                               #'ocman-open-in-ghostty
                              #'ocman-open-in-emacs-terminal)))
+```
+
+If you prefer iTerm on macOS instead:
+
+```elisp
+(setq ocman-terminal-function #'ocman-open-in-iterm)
 ```
 
 ## Notes
