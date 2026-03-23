@@ -106,18 +106,32 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
         (pop-to-buffer buf)))))
 
 (defun ocman-open-in-ghostty (directory command)
-  "Open Ghostty in DIRECTORY and run COMMAND."
+  "Open Ghostty in DIRECTORY and run COMMAND in a new tab."
   (unless (eq system-type 'darwin)
     (user-error "ocman-open-in-ghostty is only available on macOS"))
   (let* ((dir (expand-file-name directory))
-         (shell (or (getenv "SHELL") "/bin/zsh"))
-         (shell-command-string (format "cd %s && %s; exec %s -l"
-                                       (shell-quote-argument dir)
-                                       command
-                                       (shell-quote-argument shell))))
-    (call-process "open" nil 0 nil
-                  "-a" "Ghostty" "--args"
-                  "-e" shell "-lc" shell-command-string)))
+         (osa (or (executable-find "osascript")
+                  (user-error "osascript not found in PATH")))
+         (script
+          (mapconcat
+           #'identity
+           (list
+            "tell application \"Ghostty\""
+            "set cfg to new surface configuration"
+            (format "set initial working directory of cfg to %s" (prin1-to-string dir))
+            (format "set initial input of cfg to %s" (prin1-to-string (concat command "\n")))
+            "if (count of windows) = 0 then"
+            "new window with configuration cfg"
+            "else"
+            "new tab in front window with configuration cfg"
+            "end if"
+            "activate"
+            "end tell")
+           "\n")))
+    (shell-command
+     (format "%s -e %s"
+             (shell-quote-argument osa)
+             (shell-quote-argument script)))))
 
 (defun ocman-open-in-iterm (directory command)
   "Open iTerm in DIRECTORY and run COMMAND in a new tab."
@@ -334,12 +348,17 @@ Return non-nil when one row was updated."
 (defun ocman--run-command (directory command)
   "Run COMMAND in DIRECTORY and return its trimmed stdout.
 Signal a `user-error' when the command exits unsuccessfully."
-  (let ((default-directory (file-name-as-directory (expand-file-name directory))))
+  (let* ((dir (expand-file-name directory))
+         (default-directory
+           (file-name-as-directory
+            (if (file-directory-p dir)
+                dir
+              (expand-file-name "~")))))
     (with-temp-buffer
       (let ((status (call-process-shell-command command nil t)))
         (unless (eq status 0)
           (user-error
-           "Command failed in %s: %s"
+            "Command failed in %s: %s"
            default-directory
            (string-trim (buffer-string))))
         (string-trim (buffer-string))))))

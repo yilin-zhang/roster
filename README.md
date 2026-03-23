@@ -69,6 +69,9 @@ If you prefer iTerm on macOS instead:
 (setq ocman-terminal-function #'ocman-open-in-iterm)
 ```
 
+On macOS, both `ocman-open-in-ghostty` and `ocman-open-in-iterm` open a new tab
+and start `opencode` there.
+
 ## Notes
 
 - Session deletion uses `opencode session delete`.
