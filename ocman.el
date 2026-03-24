@@ -250,6 +250,52 @@ Each plist has keys :id, :title, :directory, :project-id,
               :worktree (expand-file-name worktree)
               :name (unless (string-empty-p name) name))))))
 
+(defun ocman--projects-containing-directory (directory)
+  "Return OpenCode projects whose worktrees contain DIRECTORY."
+  (let* ((dir (directory-file-name (expand-file-name directory)))
+         (sql (concat
+               "SELECT id, worktree, COALESCE(name, '') FROM project "
+               "WHERE " (ocman--sql-quote dir) " = worktree "
+               "OR " (ocman--sql-quote dir) " LIKE worktree || '/%' "
+               "ORDER BY LENGTH(worktree) DESC;"))
+         (output (ocman--sqlite-output sql)))
+    (unless (string-empty-p output)
+      (mapcar
+       (lambda (line)
+         (let* ((cols (split-string line "|"))
+                (id (nth 0 cols))
+                (worktree (nth 1 cols))
+                (name (nth 2 cols)))
+           (list :id id
+                 :worktree (expand-file-name worktree)
+                 :name (unless (string-empty-p name) name))))
+       (split-string output "\n" t)))))
+
+(defun ocman--project-label (project)
+  "Return a completion label for PROJECT."
+  (let ((worktree (plist-get project :worktree))
+        (name (plist-get project :name)))
+    (if name
+        (format "%s (%s)" worktree name)
+      worktree)))
+
+(defun ocman--resolve-target-project (directory)
+  "Return the best OpenCode project for DIRECTORY.
+Prefer an exact worktree match, otherwise fall back to a parent project whose
+worktree contains DIRECTORY."
+  (or (ocman--project-for-directory directory)
+      (let ((projects (ocman--projects-containing-directory directory)))
+        (cond
+         ((null projects) nil)
+         ((= (length projects) 1) (car projects))
+         (t
+          (let* ((labels (mapcar #'ocman--project-label projects))
+                 (choice (completing-read
+                          (format "Directory %s belongs to multiple OpenCode projects, choose one: "
+                                  (expand-file-name directory))
+                          labels nil t nil nil (car labels))))
+            (nth (cl-position choice labels :test #'equal) projects)))))))
+
 (defun ocman--session-with-project-worktree (session-id)
   "Return session plist for SESSION-ID including its project worktree."
   (let* ((sql (concat
@@ -334,7 +380,7 @@ Return non-nil when one row was updated."
     ""))
 
 (defun ocman--state-face (session)
-  "Return the face used for SESSION state." 
+  "Return the face used for SESSION state."
   (if (ocman--session-archived-p session)
       'ocman-list-archived-face
     'ocman-list-active-face))
@@ -646,7 +692,7 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
                                          old-dir nil t)))))
     (unless (file-directory-p new-dir)
       (user-error "Directory does not exist: %s" new-dir))
-    (let ((target-project (ocman--project-for-directory new-dir)))
+    (let ((target-project (ocman--resolve-target-project new-dir)))
       (unless target-project
         (user-error
          (concat
@@ -668,10 +714,11 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
                 (user-error "Updated session %s could not be reloaded" session-id))
               (unless (and (string= (plist-get updated :directory) new-dir)
                            (string= (plist-get updated :project-id) new-project-id)
-                           (string= (or (plist-get updated :project-worktree) "") new-dir))
+                           (ocman--directory-prefix-p new-dir
+                                                      (or (plist-get updated :project-worktree) "")))
                 (user-error "Session %s failed post-update consistency checks" session-id))
               (message
-               "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
+                "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
                session-id new-dir)
               t)))))))
 
