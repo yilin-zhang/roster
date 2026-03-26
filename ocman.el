@@ -271,6 +271,21 @@ Each plist has keys :id, :title, :directory, :project-id,
                  :name (unless (string-empty-p name) name))))
        (split-string output "\n" t)))))
 
+(defun ocman--global-project ()
+  "Return the OpenCode global project plist."
+  (let* ((sql (concat
+               "SELECT id, worktree, COALESCE(name, '') FROM project "
+               "WHERE id = 'global' LIMIT 1;"))
+         (output (ocman--sqlite-output sql)))
+    (unless (string-empty-p output)
+      (let* ((cols (split-string output "|"))
+             (id (nth 0 cols))
+             (worktree (nth 1 cols))
+             (name (nth 2 cols)))
+        (list :id id
+              :worktree (expand-file-name worktree)
+              :name (unless (string-empty-p name) name))))))
+
 (defun ocman--project-label (project)
   "Return a completion label for PROJECT."
   (let ((worktree (plist-get project :worktree))
@@ -282,19 +297,10 @@ Each plist has keys :id, :title, :directory, :project-id,
 (defun ocman--resolve-target-project (directory)
   "Return the best OpenCode project for DIRECTORY.
 Prefer an exact worktree match, otherwise fall back to a parent project whose
-worktree contains DIRECTORY."
+worktree contains DIRECTORY, and finally the global project."
   (or (ocman--project-for-directory directory)
-      (let ((projects (ocman--projects-containing-directory directory)))
-        (cond
-         ((null projects) nil)
-         ((= (length projects) 1) (car projects))
-         (t
-          (let* ((labels (mapcar #'ocman--project-label projects))
-                 (choice (completing-read
-                          (format "Directory %s belongs to multiple OpenCode projects, choose one: "
-                                  (expand-file-name directory))
-                          labels nil t nil nil (car labels))))
-            (nth (cl-position choice labels :test #'equal) projects)))))))
+      (car (ocman--projects-containing-directory directory))
+      (ocman--global-project)))
 
 (defun ocman--session-with-project-worktree (session-id)
   "Return session plist for SESSION-ID including its project worktree."
@@ -714,8 +720,8 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
                 (user-error "Updated session %s could not be reloaded" session-id))
               (unless (and (string= (plist-get updated :directory) new-dir)
                            (string= (plist-get updated :project-id) new-project-id)
-                           (ocman--directory-prefix-p new-dir
-                                                      (or (plist-get updated :project-worktree) "")))
+                           (string= (or (plist-get updated :project-worktree) "")
+                                    (plist-get target-project :worktree)))
                 (user-error "Session %s failed post-update consistency checks" session-id))
               (message
                 "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
