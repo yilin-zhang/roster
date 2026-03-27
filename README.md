@@ -1,16 +1,16 @@
 # ocman
 
-`ocman` is a small Emacs helper for managing OpenCode sessions.
+`ocman` is a small Emacs helper for managing OpenCode and Claude Code sessions.
 
 ## Features
 
-- Resume any existing OpenCode session
+- Resume any existing OpenCode or Claude Code session
 - Resume the latest session in the current project
 - Browse sessions in a Dired-like management buffer
 - Rename sessions
 - Archive and unarchive sessions
-- Delete sessions via the official OpenCode CLI
-- Safely move a session to another known OpenCode project directory
+- Delete sessions from either backend
+- Safely move OpenCode sessions to another directory while preserving project resolution
 
 ## Commands
 
@@ -29,6 +29,8 @@
 
 `ocman-list-sessions` opens a tabulated management buffer for root sessions.
 `ocman-list-project-sessions` narrows that view to the current project scope.
+
+The list shows an `OC` or `CC` tag for each session.
 
 - `RET` / `e`: resume session
 - `d`: delete session
@@ -58,6 +60,8 @@
              ocman-delete-session
              ocman-update-session-directory)
   :custom
+  (ocman-enabled-tools '(opencode claude))
+  (ocman-default-new-session-tool 'opencode)
   (ocman-terminal-function (if (eq system-type 'darwin)
                                #'ocman-open-in-ghostty
                              #'ocman-open-in-emacs-terminal)))
@@ -74,7 +78,8 @@ and start `opencode` there.
 
 ## Notes
 
-- Session deletion uses `opencode session delete`.
-- Rename and archive operations currently update the local OpenCode database directly to match OpenCode's internal fields.
-- Directory moves are validated against known OpenCode projects before updating both `session.directory` and `session.project_id`.
+- OpenCode session deletion uses `opencode session delete`; Claude Code deletion removes the local JSONL session file.
+- OpenCode rename and archive operations currently update the local OpenCode database directly to match OpenCode's internal fields.
+- Claude Code rename and archive state are stored in small `*.ocman.json` sidecar files next to the session JSONL files.
+- Directory moves are OpenCode-only.
 - Normal listings intentionally hide child/subagent sessions and only show root sessions.

@@ -1,14 +1,16 @@
-;;; ocman.el --- OpenCode session manager for Emacs -*- lexical-binding: t; -*-
+;;; ocman.el --- OpenCode and Claude Code session manager for Emacs -*- lexical-binding: t; -*-
 
 ;; Author: yilinzhang
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience
 
 ;;; Commentary:
 
-;; Quickly resume existing OpenCode sessions from ~/.local/share/opencode/opencode.db,
-;; or start a new session in a selected directory.
+;; Manage sessions for OpenCode (via SQLite) and Claude Code (via JSONL files).
+;; Both tools are shown in a unified session list tagged with "OC" or "CC".
+;; Session operations — resume, rename, archive/unarchive, delete — work for
+;; both tools.  Directory moves are OpenCode-only.
 
 ;;; Code:
 
@@ -17,6 +19,7 @@
 (require 'project)
 (require 'term)
 (require 'tabulated-list)
+(require 'json)
 
 (defgroup ocman nil
   "OpenCode session manager."
@@ -53,6 +56,16 @@
   "Face for timestamps in `ocman' lists."
   :group 'ocman)
 
+(defface ocman-list-tool-opencode-face
+  '((t :inherit font-lock-keyword-face))
+  "Face for the OpenCode tool tag in `ocman' lists."
+  :group 'ocman)
+
+(defface ocman-list-tool-claude-face
+  '((t :inherit font-lock-function-name-face))
+  "Face for the Claude Code tool tag in `ocman' lists."
+  :group 'ocman)
+
 (defcustom ocman-opencode-db-path
   (expand-file-name "~/.local/share/opencode/opencode.db")
   "Path to OpenCode SQLite database."
@@ -73,6 +86,29 @@ The function is called with two args: DIRECTORY and COMMAND."
 (defcustom ocman-list-include-archived t
   "Whether `ocman-list-sessions' shows archived sessions by default."
   :type 'boolean
+  :group 'ocman)
+
+(defcustom ocman-claude-dir
+  (expand-file-name "~/.claude")
+  "Path to the Claude Code configuration directory."
+  :type 'directory
+  :group 'ocman)
+
+(defcustom ocman-claude-command "claude"
+  "Claude Code executable name or full path."
+  :type 'string
+  :group 'ocman)
+
+(defcustom ocman-enabled-tools '(opencode claude)
+  "List of tools whose sessions are shown by ocman.
+Valid elements are the symbols `opencode' and `claude'."
+  :type '(set (const opencode) (const claude))
+  :group 'ocman)
+
+(defcustom ocman-default-new-session-tool 'opencode
+  "Default tool when creating a new session and multiple tools are enabled.
+Must be a symbol present in `ocman-enabled-tools'."
+  :type '(choice (const opencode) (const claude))
   :group 'ocman)
 
 (defvar ocman--completion-directory-map nil
@@ -186,17 +222,17 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
   (let ((sqlite3 (executable-find "sqlite3")))
     (unless sqlite3
       (user-error "sqlite3 command not found in PATH"))
-    (let* ((cmd (format "%s %s %s"
-                        (shell-quote-argument sqlite3)
-                        (shell-quote-argument ocman-opencode-db-path)
-                        (shell-quote-argument sql)))
-           (output (string-trim-right (shell-command-to-string cmd))))
-      output)))
+    (with-temp-buffer
+      (call-process sqlite3 nil t nil
+                    "-separator" "\t"
+                    ocman-opencode-db-path
+                    sql)
+      (string-trim-right (buffer-string)))))
 
-(defun ocman--load-sessions ()
+(defun ocman--opencode-load-sessions ()
   "Return root OpenCode sessions as a list of plists.
 Each plist has keys :id, :title, :directory, :project-id,
-:time-updated and :time-archived."
+:time-updated, :time-archived, and :tool (always `opencode')."
   (let* ((sql (concat
                 "SELECT id, title, directory, project_id, time_updated, "
                 "COALESCE(time_archived, '') "
@@ -206,21 +242,36 @@ Each plist has keys :id, :title, :directory, :project-id,
         nil
       (mapcar
        (lambda (line)
-         (let* ((cols (split-string line "|"))
-                (id (car cols))
-                (title (cadr cols))
-                (project-id (nth (- (length cols) 3) cols))
-                (time-updated (string-to-number (nth (- (length cols) 2) cols)))
-                (archived-raw (car (last cols)))
-                (directory (mapconcat #'identity (cddr (butlast cols 3)) "|")))
+         (let* ((cols (split-string line "\t"))
+                (id (nth 0 cols))
+                (title (nth 1 cols))
+                (directory (nth 2 cols))
+                (project-id (nth 3 cols))
+                (time-updated (string-to-number (or (nth 4 cols) "0")))
+                (archived-raw (or (nth 5 cols) "")))
            (list :id id
                  :title (if (string-empty-p title) "(untitled)" title)
                  :directory (expand-file-name directory)
                  :project-id project-id
                  :time-updated time-updated
                  :time-archived (unless (string-empty-p archived-raw)
-                                  (string-to-number archived-raw)))))
+                                  (string-to-number archived-raw))
+                 :tool 'opencode)))
        (split-string output "\n" t)))))
+
+(defun ocman--load-sessions ()
+  "Return sessions from all enabled tools as a unified list, newest-first.
+Loads from OpenCode and/or Claude Code per `ocman-enabled-tools'."
+  (let (all)
+    (when (memq 'opencode ocman-enabled-tools)
+      (condition-case nil
+          (setq all (nconc all (ocman--opencode-load-sessions)))
+        (user-error nil)))
+    (when (memq 'claude ocman-enabled-tools)
+      (setq all (nconc all (or (ocman--claude-load-sessions) nil))))
+    (sort all (lambda (a b)
+                (> (or (plist-get a :time-updated) 0)
+                   (or (plist-get b :time-updated) 0))))))
 
 (defun ocman--session-archived-p (session)
   "Return non-nil when SESSION is archived."
@@ -242,7 +293,7 @@ Each plist has keys :id, :title, :directory, :project-id,
                "WHERE worktree = " (ocman--sql-quote dir) " LIMIT 1;"))
          (output (ocman--sqlite-output sql)))
     (unless (string-empty-p output)
-      (let* ((cols (split-string output "|"))
+      (let* ((cols (split-string output "\t"))
              (id (nth 0 cols))
              (worktree (nth 1 cols))
              (name (nth 2 cols)))
@@ -255,14 +306,15 @@ Each plist has keys :id, :title, :directory, :project-id,
   (let* ((dir (directory-file-name (expand-file-name directory)))
          (sql (concat
                "SELECT id, worktree, COALESCE(name, '') FROM project "
-               "WHERE " (ocman--sql-quote dir) " = worktree "
-               "OR " (ocman--sql-quote dir) " LIKE worktree || '/%' "
+               "WHERE worktree = " (ocman--sql-quote dir) " "
+               "OR (LENGTH(" (ocman--sql-quote dir) ") > LENGTH(worktree) "
+               "AND SUBSTR(" (ocman--sql-quote dir) ", 1, LENGTH(worktree) + 1) = worktree || '/') "
                "ORDER BY LENGTH(worktree) DESC;"))
          (output (ocman--sqlite-output sql)))
     (unless (string-empty-p output)
       (mapcar
        (lambda (line)
-         (let* ((cols (split-string line "|"))
+         (let* ((cols (split-string line "\t"))
                 (id (nth 0 cols))
                 (worktree (nth 1 cols))
                 (name (nth 2 cols)))
@@ -278,7 +330,7 @@ Each plist has keys :id, :title, :directory, :project-id,
                "WHERE id = 'global' LIMIT 1;"))
          (output (ocman--sqlite-output sql)))
     (unless (string-empty-p output)
-      (let* ((cols (split-string output "|"))
+      (let* ((cols (split-string output "\t"))
              (id (nth 0 cols))
              (worktree (nth 1 cols))
              (name (nth 2 cols)))
@@ -311,13 +363,13 @@ worktree contains DIRECTORY, and finally the global project."
                "WHERE s.id = " (ocman--sql-quote session-id) " LIMIT 1;"))
          (output (ocman--sqlite-output sql)))
     (unless (string-empty-p output)
-      (let* ((cols (split-string output "|"))
+      (let* ((cols (split-string output "\t"))
              (id (nth 0 cols))
              (title (nth 1 cols))
+             (directory (nth 2 cols))
              (project-id (nth 3 cols))
-             (project-worktree (nth 4 cols))
-             (archived-raw (nth 5 cols))
-             (directory (nth 2 cols)))
+             (project-worktree (or (nth 4 cols) ""))
+             (archived-raw (or (nth 5 cols) "")))
         (list :id id
               :title (if (string-empty-p title) "(untitled)" title)
               :directory (expand-file-name directory)
@@ -415,7 +467,7 @@ Signal a `user-error' when the command exits unsuccessfully."
            (string-trim (buffer-string))))
         (string-trim (buffer-string))))))
 
-(defun ocman--delete-session (session)
+(defun ocman--opencode-delete-session (session)
   "Delete OpenCode SESSION via the official CLI workflow."
   (let* ((session-id (plist-get session :id))
          (directory (plist-get session :directory))
@@ -423,6 +475,205 @@ Signal a `user-error' when the command exits unsuccessfully."
                           ocman-opencode-command
                           (shell-quote-argument session-id))))
     (ocman--run-command directory command)))
+
+;;; Claude Code backend
+
+(defun ocman--claude-projects-dir ()
+  "Return the Claude Code projects directory."
+  (expand-file-name "projects" ocman-claude-dir))
+
+(defun ocman--claude-sidecar-path (encoded-dir session-id)
+  "Return the path to the ocman sidecar JSON file for a Claude Code session."
+  (expand-file-name (concat session-id ".ocman.json")
+                    (expand-file-name encoded-dir (ocman--claude-projects-dir))))
+
+(defun ocman--claude-read-sidecar (encoded-dir session-id)
+  "Return ocman metadata alist for a Claude Code session, or nil if no sidecar."
+  (let ((path (ocman--claude-sidecar-path encoded-dir session-id)))
+    (when (file-readable-p path)
+      (condition-case nil
+          (let ((json-object-type 'alist)
+                (json-key-type 'string))
+            (json-read-file path))
+        (error nil)))))
+
+(defun ocman--claude-write-sidecar (encoded-dir session-id title time-archived)
+  "Write ocman sidecar JSON for a Claude Code session.
+TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
+  (let ((path (ocman--claude-sidecar-path encoded-dir session-id))
+        (data (append (when title `(("title" . ,title)))
+                      (when time-archived `(("time_archived" . ,time-archived))))))
+    (with-temp-file path
+      (insert (json-encode data)))))
+
+(defun ocman--claude-parse-jsonl (path)
+  "Return metadata plist from the head of a Claude Code JSONL file at PATH.
+Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
+:title-candidate, and :time-updated (file mtime in milliseconds)."
+  (condition-case nil
+      (let (slug cwd title-candidate)
+        (with-temp-buffer
+          (insert-file-contents path nil 0 8192)
+          (goto-char (point-min))
+          (while (and (not (eobp))
+                      (not (and slug cwd title-candidate)))
+            (let* ((line (buffer-substring-no-properties
+                          (point) (line-end-position)))
+                   (obj (condition-case nil
+                            (let ((json-object-type 'plist)
+                                  (json-key-type 'keyword)
+                                  (json-array-type 'list)
+                                  (json-null nil)
+                                  (json-false nil))
+                              (json-read-from-string line))
+                          (error nil))))
+              (when obj
+                (unless slug
+                  (setq slug (plist-get obj :slug)))
+                (when (equal (plist-get obj :type) "user")
+                  (unless cwd
+                    (let ((w (plist-get obj :cwd)))
+                      (when (and (stringp w) (not (string-empty-p w)))
+                        (setq cwd w))))
+                  (unless title-candidate
+                    (let* ((msg (plist-get obj :message))
+                           (content (when (listp msg) (plist-get msg :content)))
+                           (text nil))
+                      (setq text
+                            (cond
+                             ((and (stringp content)
+                                   (not (string-empty-p (string-trim content))))
+                              (string-trim content))
+                             ((listp content)
+                              (catch 'found
+                                (dolist (part content)
+                                  (when (and (listp part)
+                                             (equal (plist-get part :type) "text"))
+                                    (let ((part-text (string-trim
+                                                      (or (plist-get part :text) ""))))
+                                      (unless (string-empty-p part-text)
+                                        (throw 'found part-text)))))
+                                nil))))
+                      (when text
+                        (setq title-candidate text)))))))
+            (forward-line 1)))
+        (let* ((attrs (file-attributes path))
+               (mtime (when attrs (file-attribute-modification-time attrs)))
+               (time-updated (if mtime
+                                 (floor (* 1000 (float-time mtime)))
+                               0)))
+          (list :slug slug
+                :cwd (or cwd "")
+                :title-candidate title-candidate
+                :time-updated time-updated)))
+    (error nil)))
+
+(defun ocman--claude-load-sessions ()
+  "Return Claude Code sessions as a list of unified session plists."
+  (let ((projects-dir (ocman--claude-projects-dir)))
+    (when (file-directory-p projects-dir)
+      (let (sessions)
+        (dolist (encoded-dir (directory-files projects-dir nil "^[^.]"))
+          (let ((dir-path (expand-file-name encoded-dir projects-dir)))
+            (when (file-directory-p dir-path)
+              (dolist (fname (directory-files dir-path nil "\\.jsonl\\'"))
+                (let* ((session-id (file-name-sans-extension fname))
+                       (jsonl-path (expand-file-name fname dir-path))
+                       (meta (ocman--claude-parse-jsonl jsonl-path))
+                       (sidecar (when meta
+                                  (ocman--claude-read-sidecar
+                                   encoded-dir session-id))))
+                  (when meta
+                    (let* ((slug (plist-get meta :slug))
+                           (candidate (plist-get meta :title-candidate))
+                           (sidecar-title (cdr (assoc "title" sidecar)))
+                           (title (or sidecar-title
+                                      slug
+                                      (when candidate
+                                        (if (> (length candidate) 60)
+                                            (concat (substring candidate 0 57)
+                                                    "...")
+                                          candidate))
+                                      "(untitled)"))
+                           (cwd (plist-get meta :cwd))
+                           (time-archived
+                            (let ((v (cdr (assoc "time_archived" sidecar))))
+                              (when (numberp v) v))))
+                      (push (list :id session-id
+                                  :title title
+                                  :directory (expand-file-name
+                                              (if (string-empty-p cwd) "~" cwd))
+                                  :project-id encoded-dir
+                                  :time-updated (plist-get meta :time-updated)
+                                  :time-archived time-archived
+                                  :tool 'claude
+                                  :encoded-dir encoded-dir)
+                            sessions))))))))
+        (sort sessions
+              (lambda (a b)
+                (> (or (plist-get a :time-updated) 0)
+                   (or (plist-get b :time-updated) 0))))))))
+
+(defun ocman--claude-delete-session (session)
+  "Delete a Claude Code SESSION's JSONL file and ocman sidecar."
+  (let* ((session-id (plist-get session :id))
+         (encoded-dir (plist-get session :encoded-dir))
+         (dir (expand-file-name encoded-dir (ocman--claude-projects-dir)))
+         (jsonl (expand-file-name (concat session-id ".jsonl") dir))
+         (sidecar (ocman--claude-sidecar-path encoded-dir session-id)))
+    (when (file-exists-p jsonl)
+      (delete-file jsonl))
+    (when (file-exists-p sidecar)
+      (delete-file sidecar))))
+
+(defun ocman--claude-rename-session-command (session)
+  "Rename a Claude Code SESSION via its ocman sidecar; return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (encoded-dir (plist-get session :encoded-dir))
+         (old-title (plist-get session :title))
+         (new-title (string-trim
+                     (read-string (format "Rename session (%s): " old-title)
+                                  old-title))))
+    (when (string-empty-p new-title)
+      (user-error "Session title cannot be empty"))
+    (if (string= old-title new-title)
+        (progn (message "Session %s already uses that title" session-id) nil)
+      (let ((sidecar (ocman--claude-read-sidecar encoded-dir session-id)))
+        (ocman--claude-write-sidecar
+         encoded-dir session-id
+         new-title
+         (when sidecar (cdr (assoc "time_archived" sidecar))))
+        (message "Renamed session %s to %s" session-id new-title)
+        t))))
+
+(defun ocman--claude-set-archived-command (session archived)
+  "Set a Claude Code SESSION archived state to ARCHIVED; return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (encoded-dir (plist-get session :encoded-dir))
+         (title (plist-get session :title))
+         (verb (if archived "Archive" "Unarchive")))
+    (when (yes-or-no-p (format "%s Claude session '%s' (%s)? " verb title session-id))
+      (let* ((sidecar (ocman--claude-read-sidecar encoded-dir session-id))
+             (old-title (when sidecar (cdr (assoc "title" sidecar))))
+             (new-archived (when archived
+                             (floor (* 1000 (float-time (current-time)))))))
+        (ocman--claude-write-sidecar encoded-dir session-id old-title new-archived)
+        (message "%sd session %s" verb session-id)
+        t))))
+
+;;; Tool helpers
+
+(defun ocman--tool-label (session)
+  "Return the short tool tag string for SESSION."
+  (pcase (plist-get session :tool)
+    ('claude "CC")
+    (_        "OC")))
+
+(defun ocman--tool-face (session)
+  "Return the face for SESSION's tool tag."
+  (pcase (plist-get session :tool)
+    ('claude 'ocman-list-tool-claude-face)
+    (_        'ocman-list-tool-opencode-face)))
 
 (defun ocman--session-labels (sessions)
   "Build completion labels for SESSIONS.
@@ -485,22 +736,37 @@ otherwise return `default-directory'."
      sessions)))
 
 (defun ocman--start-new-session-with-directory-prompt ()
-  "Prompt for directory and start a new OpenCode session there."
-  (let ((dir (read-directory-name "No session found, choose directory for new OpenCode session: "
-                                  default-directory nil t)))
-    (funcall ocman-terminal-function dir ocman-opencode-command)))
+  "Prompt for a directory and optional tool, then start a new session."
+  (let* ((dir (read-directory-name "Directory for new session: "
+                                   default-directory nil t))
+         (tool (if (cdr ocman-enabled-tools)
+                   (intern (completing-read
+                            "Tool: "
+                            (mapcar #'symbol-name ocman-enabled-tools)
+                            nil t nil nil
+                            (symbol-name ocman-default-new-session-tool)))
+                 (or (car ocman-enabled-tools) 'opencode)))
+         (command (pcase tool
+                    ('claude ocman-claude-command)
+                    (_ ocman-opencode-command))))
+    (funcall ocman-terminal-function dir command)))
 
 (defun ocman--resume-session (session)
-  "Resume OpenCode SESSION, optionally jumping to its directory first."
+  "Resume SESSION, optionally jumping to its directory in Emacs first."
   (let* ((session-id (plist-get session :id))
-         (directory (plist-get session :directory)))
+         (directory (plist-get session :directory))
+         (command (pcase (or (plist-get session :tool) 'opencode)
+                    ('claude
+                     (format "%s -r %s"
+                             ocman-claude-command
+                             (shell-quote-argument session-id)))
+                    (_
+                     (format "%s -s %s"
+                             ocman-opencode-command
+                             (shell-quote-argument session-id))))))
     (when (y-or-n-p (format "Jump to directory in Emacs first (%s)? " directory))
       (dired directory))
-    (funcall ocman-terminal-function
-     directory
-     (format "%s -s %s"
-             ocman-opencode-command
-             (shell-quote-argument session-id)))))
+    (funcall ocman-terminal-function directory command)))
 
 (defun ocman--list-sessions ()
   "Return sessions for the current `ocman' list buffer."
@@ -517,6 +783,7 @@ otherwise return `default-directory'."
     (list (plist-get session :id)
           (vector
            (concat "  " (propertize (plist-get session :title) 'face 'ocman-list-title-face))
+           (propertize (ocman--tool-label session) 'face (ocman--tool-face session))
            (propertize (upcase (ocman--session-state session)) 'face (ocman--state-face session))
            (propertize (file-name-nondirectory (directory-file-name directory))
                        'face 'ocman-list-project-face)
@@ -592,7 +859,7 @@ otherwise return `default-directory'."
         (forward-line -1)))))
 
 (defun ocman-list-new-session ()
-  "Start a new OpenCode session from the list buffer."
+  "Start a new session from the list buffer."
   (interactive)
   (ocman--start-new-session-with-directory-prompt))
 
@@ -615,11 +882,12 @@ otherwise return `default-directory'."
 
 (define-derived-mode ocman-list-mode tabulated-list-mode "ocman"
   "Major mode for managing OpenCode sessions."
-  (setq tabulated-list-format [("Title" 28 t)
-                               ("State" 10 t)
-                               ("Project" 18 t)
-                               ("Directory" 42 t)
-                               ("Updated" 16 t)])
+  (setq tabulated-list-format [("Title"     28 t)
+                               ("Tool"       4 t)
+                               ("State"     10 t)
+                               ("Project"   18 t)
+                               ("Directory" 38 t)
+                               ("Updated"   16 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Updated" . nil))
   (add-hook 'tabulated-list-revert-hook #'ocman--list-refresh nil t)
@@ -627,7 +895,8 @@ otherwise return `default-directory'."
 
 (defun ocman--open-list-buffer (buffer-name source-function &optional include-archived)
   "Open an `ocman' list BUFFER-NAME using SOURCE-FUNCTION.
-When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
+When INCLUDE-ARCHIVED is non-nil, archived sessions are shown initially.
+When omitted or nil, the value of `ocman-list-include-archived' is used."
   (let ((buffer (get-buffer-create buffer-name)))
     (with-current-buffer buffer
       (ocman-list-mode)
@@ -640,8 +909,8 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
       (tabulated-list-revert))
     (pop-to-buffer buffer)))
 
-(defun ocman--rename-session-command (session)
-  "Rename SESSION and return non-nil when it changes."
+(defun ocman--opencode-rename-session-command (session)
+  "Rename an OpenCode SESSION via SQLite and return non-nil when changed."
   (let* ((session-id (plist-get session :id))
          (old-title (plist-get session :title))
          (new-title (string-trim
@@ -662,8 +931,14 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
         (message "Renamed session %s to %s" session-id new-title)
         t))))
 
-(defun ocman--set-session-archived-command (session archived)
-  "Set SESSION archived state to ARCHIVED and return non-nil on change."
+(defun ocman--rename-session-command (session)
+  "Rename SESSION and return non-nil when the title changes."
+  (pcase (plist-get session :tool)
+    ('claude (ocman--claude-rename-session-command session))
+    (_       (ocman--opencode-rename-session-command session))))
+
+(defun ocman--opencode-set-archived-command (session archived)
+  "Set an OpenCode SESSION archived state to ARCHIVED; return non-nil on change."
   (let* ((session-id (plist-get session :id))
          (title (plist-get session :title))
          (verb (if archived "Archive" "Unarchive")))
@@ -677,18 +952,29 @@ When INCLUDE-ARCHIVED is nil, archived sessions are hidden initially."
         (message "%sd session %s" verb session-id)
         t))))
 
+(defun ocman--set-session-archived-command (session archived)
+  "Set SESSION archived state to ARCHIVED and return non-nil on change."
+  (pcase (plist-get session :tool)
+    ('claude (ocman--claude-set-archived-command session archived))
+    (_       (ocman--opencode-set-archived-command session archived))))
+
 (defun ocman--delete-session-command (session)
-  "Delete SESSION using the official CLI and return non-nil on success."
+  "Delete SESSION and return non-nil on success."
   (let ((session-id (plist-get session :id))
         (title (plist-get session :title))
         (directory (plist-get session :directory)))
-    (when (yes-or-no-p (format "Delete OpenCode session '%s' (%s)? " title session-id))
-      (ocman--delete-session session)
+    (when (yes-or-no-p (format "Delete session '%s' (%s)? " title session-id))
+      (pcase (plist-get session :tool)
+        ('claude (ocman--claude-delete-session session))
+        (_       (ocman--opencode-delete-session session)))
       (message "Deleted session %s from %s" session-id directory)
       t)))
 
 (defun ocman--update-session-directory-command (session)
-  "Move SESSION to another known OpenCode project directory."
+  "Move SESSION to another known OpenCode project directory.
+Signals a `user-error' for Claude Code sessions, which are not movable."
+  (when (eq (plist-get session :tool) 'claude)
+    (user-error "Directory moves are not supported for Claude Code sessions"))
   (let* ((session-id (plist-get session :id))
          (old-dir (plist-get session :directory))
          (old-project-id (plist-get session :project-id))
