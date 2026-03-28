@@ -4,10 +4,10 @@ Roster is an Emacs package for managing AI coding sessions from OpenCode,
 Claude Code, and Codex.
 
 These tools accumulate sessions over time with no easy way to browse, resume, or
-clean them up from inside Emacs. Roster puts all sessions in a unified
-`tabulated-list-mode` buffer — tagged `OC` for OpenCode, `CC` for Claude Code,
-and `CX` for Codex — and lets you resume, rename, archive, delete, and move
-them without leaving your editor.
+clean them up. Roster puts all sessions in a unified `tabulated-list-mode`
+buffer — tagged `OC` for OpenCode, `CC` for Claude Code, and `CX` for Codex —
+and lets you resume, rename, archive, delete, and move them without leaving your
+editor.
 
 ## Install
 
@@ -28,9 +28,7 @@ them without leaving your editor.
   :custom
   (roster-enabled-tools '(opencode claude codex))
   (roster-default-new-session-tool 'opencode)
-  (roster-terminal-function (if (eq system-type 'darwin)
-                               #'roster-open-in-ghostty
-                             #'roster-open-in-emacs-terminal)))
+  (roster-terminal-function #'roster-open-in-ghostty))
 ```
 
 On macOS, `roster-open-in-ghostty` and `roster-open-in-iterm` are also
@@ -69,6 +67,11 @@ there:
 | `t`         | Toggle display of archived sessions       |
 | `g`         | Refresh                                   |
 | `q`         | Quit                                      |
+| `m`         | Mark session at point (or region)         |
+| `u`         | Unmark session at point                   |
+| `U`         | Unmark all                                |
+| `D`         | Delete all marked sessions                |
+| `A`         | Archive/unarchive all marked sessions     |
 
 Directory moves (`R`) are only supported for OpenCode sessions.
 
