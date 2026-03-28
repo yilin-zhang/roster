@@ -1,4 +1,4 @@
-;;; ocman.el --- Session manager for OpenCode and Claude Code -*- lexical-binding: t; -*-
+;;; roster.el --- Session manager for OpenCode and Claude Code -*- lexical-binding: t; -*-
 
 ;; Author: yilinzhang
 ;; Version: 0.2.0
@@ -7,16 +7,16 @@
 
 ;;; Commentary:
 
-;; ocman manages AI coding sessions for OpenCode and Claude Code inside Emacs.
+;; roster manages AI coding sessions for OpenCode and Claude Code inside Emacs.
 ;;
 ;; Sessions from both tools are shown in a unified `tabulated-list-mode' buffer
 ;; tagged "OC" (OpenCode) or "CC" (Claude Code).  Supported operations:
 ;;   resume, rename, archive/unarchive, delete, and directory moves (OpenCode only).
 ;;
 ;; Storage backends:
-;;   OpenCode  — reads and writes the SQLite database at `ocman-opencode-db-path'.
-;;   Claude Code — reads JSONL conversation files under `ocman-claude-dir'/projects/.
-;;                 Custom metadata (title, archive state) is kept in .ocman.json
+;;   OpenCode  — reads and writes the SQLite database at `roster-opencode-db-path'.
+;;   Claude Code — reads JSONL conversation files under `roster-claude-dir'/projects/.
+;;                 Custom metadata (title, archive state) is kept in .roster.json
 ;;                 sidecar files because Claude Code's database is not third-party
 ;;                 writable.
 ;;
@@ -35,164 +35,164 @@
 (declare-function vterm-send-string "ext:vterm" (string &optional paste-p))
 (declare-function vterm-send-return "ext:vterm" ())
 
-(defgroup ocman nil
+(defgroup roster nil
   "Session manager for OpenCode and Claude Code."
   :group 'tools
-  :prefix "ocman-")
+  :prefix "roster-")
 
-(defface ocman-list-title-face
+(defface roster-list-title-face
   '((t :inherit default :weight bold))
-  "Face for session titles in `ocman' lists."
-  :group 'ocman)
+  "Face for session titles in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-active-face
+(defface roster-list-active-face
   '((t :inherit success))
-  "Face for active session state in `ocman' lists."
-  :group 'ocman)
+  "Face for active session state in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-archived-face
+(defface roster-list-archived-face
   '((t :inherit shadow :slant italic))
-  "Face for archived session state in `ocman' lists."
-  :group 'ocman)
+  "Face for archived session state in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-project-face
+(defface roster-list-project-face
   '((t :inherit font-lock-builtin-face))
-  "Face for project names in `ocman' lists."
-  :group 'ocman)
+  "Face for project names in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-directory-face
+(defface roster-list-directory-face
   '((t :inherit font-lock-comment-face))
-  "Face for directory paths in `ocman' lists."
-  :group 'ocman)
+  "Face for directory paths in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-time-face
+(defface roster-list-time-face
   '((t :inherit font-lock-comment-face :slant italic))
-  "Face for timestamps in `ocman' lists."
-  :group 'ocman)
+  "Face for timestamps in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-tool-opencode-face
+(defface roster-list-tool-opencode-face
   '((t :inherit ansi-color-blue))
-  "Face for the OpenCode tool tag in `ocman' lists."
-  :group 'ocman)
+  "Face for the OpenCode tool tag in `roster' lists."
+  :group 'roster)
 
-(defface ocman-list-tool-claude-face
+(defface roster-list-tool-claude-face
   '((t :inherit ansi-color-yellow))
-  "Face for the Claude Code tool tag in `ocman' lists."
-  :group 'ocman)
+  "Face for the Claude Code tool tag in `roster' lists."
+  :group 'roster)
 
-(defcustom ocman-opencode-db-path
+(defcustom roster-opencode-db-path
   (expand-file-name "~/.local/share/opencode/opencode.db")
   "Path to OpenCode SQLite database."
   :type 'file
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-opencode-command "opencode"
+(defcustom roster-opencode-command "opencode"
   "OpenCode executable name or full path."
   :type 'string
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-terminal-function #'ocman-open-in-emacs-terminal
+(defcustom roster-terminal-function #'roster-open-in-emacs-terminal
   "Function used to open terminal and run command.
 The function is called with two args: DIRECTORY and COMMAND."
   :type 'function
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-list-include-archived t
-  "Whether `ocman-list-sessions' shows archived sessions by default."
+(defcustom roster-list-include-archived t
+  "Whether `roster-list-sessions' shows archived sessions by default."
   :type 'boolean
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-claude-dir
+(defcustom roster-claude-dir
   (expand-file-name "~/.claude")
   "Path to the Claude Code configuration directory."
   :type 'directory
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-claude-command "claude"
+(defcustom roster-claude-command "claude"
   "Claude Code executable name or full path."
   :type 'string
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-enabled-tools '(opencode claude)
-  "List of tools whose sessions are shown by ocman.
+(defcustom roster-enabled-tools '(opencode claude)
+  "List of tools whose sessions are shown by roster.
 Valid elements are the symbols `opencode' and `claude'."
   :type '(set (const opencode) (const claude))
-  :group 'ocman)
+  :group 'roster)
 
-(defcustom ocman-default-new-session-tool 'opencode
+(defcustom roster-default-new-session-tool 'opencode
   "Default tool when creating a new session and multiple tools are enabled.
-Must be a symbol present in `ocman-enabled-tools'."
+Must be a symbol present in `roster-enabled-tools'."
   :type '(choice (const opencode) (const claude))
-  :group 'ocman)
+  :group 'roster)
 
-(defvar ocman--completion-directory-map nil
+(defvar roster--completion-directory-map nil
   "Alist from displayed candidate title to session directory.")
 
-(defvar ocman-list-buffer-name "*ocman*"
-  "Buffer name used for the main `ocman' session list.")
+(defvar roster-list-buffer-name "*roster*"
+  "Buffer name used for the main `roster' session list.")
 
-(defvar-local ocman-list-source-function nil
-  "Function returning sessions for the current `ocman' list buffer.")
+(defvar-local roster-list-source-function nil
+  "Function returning sessions for the current `roster' list buffer.")
 
-(defvar-local ocman-list-show-archived ocman-list-include-archived
-  "Whether the current `ocman' list buffer shows archived sessions.")
+(defvar-local roster-list-show-archived roster-list-include-archived
+  "Whether the current `roster' list buffer shows archived sessions.")
 
-(defconst ocman--claude-jsonl-read-limit 8192
+(defconst roster--claude-jsonl-read-limit 8192
   "Maximum bytes read from a Claude Code JSONL file when parsing metadata.
 8 KB is enough to capture the system entry (slug) and the first user message
 \(title candidate) without loading arbitrarily large conversation files.")
 
-(defun ocman--session-tool (session)
+(defun roster--session-tool (session)
   "Return SESSION backend symbol, defaulting to `opencode'."
   (or (plist-get session :tool) 'opencode))
 
-(defun ocman--session-id (session)
+(defun roster--session-id (session)
   "Return SESSION id."
   (plist-get session :id))
 
-(defun ocman--session-title (session)
+(defun roster--session-title (session)
   "Return SESSION title."
   (plist-get session :title))
 
-(defun ocman--session-directory (session)
+(defun roster--session-directory (session)
   "Return SESSION directory."
   (plist-get session :directory))
 
-(defun ocman--sort-sessions (sessions)
+(defun roster--sort-sessions (sessions)
   "Return SESSIONS sorted by descending update time."
   (sort sessions
         (lambda (a b)
           (> (or (plist-get a :time-updated) 0)
              (or (plist-get b :time-updated) 0)))))
 
-(defun ocman--enabled-tool-p (tool)
-  "Return non-nil when TOOL is enabled in `ocman-enabled-tools'."
-  (memq tool ocman-enabled-tools))
+(defun roster--enabled-tool-p (tool)
+  "Return non-nil when TOOL is enabled in `roster-enabled-tools'."
+  (memq tool roster-enabled-tools))
 
-(defun ocman--buffer-name-for-directory (directory)
-  "Return an `ocman' terminal buffer name for DIRECTORY."
+(defun roster--buffer-name-for-directory (directory)
+  "Return an `roster' terminal buffer name for DIRECTORY."
   (let ((name (file-name-nondirectory
                (directory-file-name (file-name-as-directory directory)))))
-    (generate-new-buffer-name (format "*ocman:%s*" name))))
+    (generate-new-buffer-name (format "*roster:%s*" name))))
 
-(defun ocman--available-shell ()
+(defun roster--available-shell ()
   "Return the preferred interactive shell path."
   (or explicit-shell-file-name shell-file-name (getenv "SHELL") "/bin/sh"))
 
-(defun ocman--readable-session-list (sessions missing-message)
+(defun roster--readable-session-list (sessions missing-message)
   "Return SESSIONS or signal MISSING-MESSAGE when empty."
   (unless sessions
     (user-error "%s" missing-message))
   sessions)
 
-(defun ocman--select-from-sessions (sessions prompt missing-message)
+(defun roster--select-from-sessions (sessions prompt missing-message)
   "Select one entry from SESSIONS using PROMPT.
 Signal MISSING-MESSAGE when SESSIONS is empty."
-  (ocman--select-session
-   (ocman--readable-session-list sessions missing-message)
+  (roster--select-session
+   (roster--readable-session-list sessions missing-message)
    prompt))
 
-(defun ocman--claude-jsonl-files (projects-dir)
+(defun roster--claude-jsonl-files (projects-dir)
   "Return `(ENCODED-DIR . PATH)' pairs for Claude JSONL files in PROJECTS-DIR."
   (let (result)
     (dolist (encoded-dir (directory-files projects-dir nil "^[^.]"))
@@ -202,12 +202,12 @@ Signal MISSING-MESSAGE when SESSIONS is empty."
             (push (cons encoded-dir (expand-file-name fname dir-path)) result)))))
     (nreverse result)))
 
-(defun ocman-open-in-emacs-terminal (directory command)
+(defun roster-open-in-emacs-terminal (directory command)
   "Open terminal in Emacs for DIRECTORY and run COMMAND.
 Uses `vterm' when available, otherwise falls back to `ansi-term'."
   (require 'term)
   (let* ((default-directory (file-name-as-directory (expand-file-name directory)))
-         (buffer-name (ocman--buffer-name-for-directory default-directory)))
+         (buffer-name (roster--buffer-name-for-directory default-directory)))
     (if (fboundp 'vterm)
         (let ((buf (vterm buffer-name)))
           (run-with-timer 0 nil
@@ -217,16 +217,16 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
                               (vterm-send-return)))
                           buf command)
           (pop-to-buffer buf))
-      (let* ((shell (ocman--available-shell))
+      (let* ((shell (roster--available-shell))
              (buf (ansi-term shell buffer-name)))
         (with-current-buffer buf
           (term-send-raw-string (concat command "\n")))
         (pop-to-buffer buf)))))
 
-(defun ocman-open-in-ghostty (directory command)
+(defun roster-open-in-ghostty (directory command)
   "Open Ghostty in DIRECTORY and run COMMAND in a new tab."
   (unless (eq system-type 'darwin)
-    (user-error "ocman-open-in-ghostty is only available on macOS"))
+    (user-error "roster-open-in-ghostty is only available on macOS"))
   (let* ((dir (expand-file-name directory))
          (osa (or (executable-find "osascript")
                   (user-error "osascript not found in PATH")))
@@ -252,10 +252,10 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
              (shell-quote-argument osa)
              (shell-quote-argument script)))))
 
-(defun ocman-open-in-iterm (directory command)
+(defun roster-open-in-iterm (directory command)
   "Open iTerm in DIRECTORY and run COMMAND in a new tab."
   (unless (eq system-type 'darwin)
-    (user-error "ocman-open-in-iterm is only available on macOS"))
+    (user-error "roster-open-in-iterm is only available on macOS"))
   (let* ((dir (expand-file-name directory))
          (shell (or (getenv "SHELL") "/bin/zsh"))
          (full-command (format "%s -lc %s"
@@ -294,47 +294,47 @@ Uses `vterm' when available, otherwise falls back to `ansi-term'."
              (shell-quote-argument osa)
              (shell-quote-argument script)))))
 
-(defun ocman--sql-quote (value)
+(defun roster--sql-quote (value)
   "Return SQL single-quoted VALUE with escaped apostrophes."
   (concat "'" (replace-regexp-in-string "'" "''" value t t) "'"))
 
-(defun ocman--sqlite-open ()
+(defun roster--sqlite-open ()
   "Open the OpenCode database and return a connection.
 Signal `user-error' if the file is missing or the database cannot be opened."
-  (unless (file-readable-p ocman-opencode-db-path)
-    (user-error "OpenCode database not found: %s" ocman-opencode-db-path))
+  (unless (file-readable-p roster-opencode-db-path)
+    (user-error "OpenCode database not found: %s" roster-opencode-db-path))
   (condition-case err
-      (sqlite-open ocman-opencode-db-path)
+      (sqlite-open roster-opencode-db-path)
     (error (user-error "Cannot open OpenCode database: %s"
                        (error-message-string err)))))
 
-(defun ocman--sqlite-rows (sql)
+(defun roster--sqlite-rows (sql)
   "Run SELECT SQL against the OpenCode database; return a list of rows.
 Each row is a list of strings (NULL values become empty strings).
 Returns nil when the result set is empty."
-  (let ((db (ocman--sqlite-open)))
+  (let ((db (roster--sqlite-open)))
     (unwind-protect
         (mapcar (lambda (row)
                   (mapcar (lambda (v) (if v (format "%s" v) "")) row))
                 (sqlite-select db sql))
       (sqlite-close db))))
 
-(defun ocman--sqlite-exec-change-p (sql)
+(defun roster--sqlite-exec-change-p (sql)
   "Run a single DML SQL statement against the OpenCode database.
 Return non-nil when exactly one row was affected."
-  (let ((db (ocman--sqlite-open)))
+  (let ((db (roster--sqlite-open)))
     (unwind-protect
         (= 1 (sqlite-execute db sql))
       (sqlite-close db))))
 
-(defun ocman--parse-project-row (row)
+(defun roster--parse-project-row (row)
   "Return project plist parsed from SQLite ROW (a list of strings)."
   (pcase-let ((`(,id ,worktree ,name) row))
     (list :id id
           :worktree (expand-file-name worktree)
           :name (unless (string-empty-p name) name))))
 
-(defun ocman--parse-opencode-session-row (row)
+(defun roster--parse-opencode-session-row (row)
   "Return OpenCode session plist parsed from SQLite ROW (a list of strings)."
   (pcase-let ((`(,id ,title ,directory ,project-id ,time-updated ,archived-raw) row))
     (list :id id
@@ -346,72 +346,72 @@ Return non-nil when exactly one row was affected."
                            (string-to-number archived-raw))
           :tool 'opencode)))
 
-(defun ocman--query-projects (sql)
+(defun roster--query-projects (sql)
   "Return project plists for SQL query SQL."
-  (mapcar #'ocman--parse-project-row (ocman--sqlite-rows sql)))
+  (mapcar #'roster--parse-project-row (roster--sqlite-rows sql)))
 
-(defun ocman--opencode-load-sessions ()
+(defun roster--opencode-load-sessions ()
   "Return root OpenCode sessions as a list of plists.
 Each plist has keys :id, :title, :directory, :project-id,
 :time-updated, :time-archived, and :tool (always `opencode')."
-  (mapcar #'ocman--parse-opencode-session-row
-          (ocman--sqlite-rows
+  (mapcar #'roster--parse-opencode-session-row
+          (roster--sqlite-rows
            (concat "SELECT id, title, directory, project_id, time_updated, "
                    "COALESCE(time_archived, '') "
                    "FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC;"))))
 
-(defun ocman--load-sessions ()
+(defun roster--load-sessions ()
   "Return sessions from all enabled tools as a unified list, newest-first.
-Loads from OpenCode and/or Claude Code per `ocman-enabled-tools'."
+Loads from OpenCode and/or Claude Code per `roster-enabled-tools'."
   (let (all)
-    (when (ocman--enabled-tool-p 'opencode)
+    (when (roster--enabled-tool-p 'opencode)
       (condition-case err
-          (setq all (nconc all (ocman--opencode-load-sessions)))
-        (user-error (message "ocman: OpenCode sessions unavailable: %s" (cadr err)))))
-    (when (ocman--enabled-tool-p 'claude)
-      (setq all (nconc all (ocman--claude-load-sessions))))
-    (ocman--sort-sessions all)))
+          (setq all (nconc all (roster--opencode-load-sessions)))
+        (user-error (message "roster: OpenCode sessions unavailable: %s" (cadr err)))))
+    (when (roster--enabled-tool-p 'claude)
+      (setq all (nconc all (roster--claude-load-sessions))))
+    (roster--sort-sessions all)))
 
-(defun ocman--session-archived-p (session)
+(defun roster--session-archived-p (session)
   "Return non-nil when SESSION is archived."
   (numberp (plist-get session :time-archived)))
 
-(defun ocman--active-sessions (sessions)
+(defun roster--active-sessions (sessions)
   "Return unarchived SESSIONS."
-  (seq-remove #'ocman--session-archived-p sessions))
+  (seq-remove #'roster--session-archived-p sessions))
 
-(defun ocman--archived-sessions (sessions)
+(defun roster--archived-sessions (sessions)
   "Return archived SESSIONS."
-  (seq-filter #'ocman--session-archived-p sessions))
+  (seq-filter #'roster--session-archived-p sessions))
 
-(defun ocman--project-for-directory (directory)
+(defun roster--project-for-directory (directory)
   "Return project plist for DIRECTORY when it matches a project worktree exactly."
   (let* ((dir (directory-file-name (expand-file-name directory)))
          (sql (concat
                "SELECT id, worktree, COALESCE(name, '') FROM project "
-               "WHERE worktree = " (ocman--sql-quote dir) " LIMIT 1;"))
-         (projects (ocman--query-projects sql)))
+               "WHERE worktree = " (roster--sql-quote dir) " LIMIT 1;"))
+         (projects (roster--query-projects sql)))
     (car projects)))
 
-(defun ocman--projects-containing-directory (directory)
+(defun roster--projects-containing-directory (directory)
   "Return OpenCode projects whose worktrees contain DIRECTORY."
   (let* ((dir (directory-file-name (expand-file-name directory)))
          (sql (concat
                "SELECT id, worktree, COALESCE(name, '') FROM project "
-               "WHERE worktree = " (ocman--sql-quote dir) " "
-               "OR (LENGTH(" (ocman--sql-quote dir) ") > LENGTH(worktree) "
-               "AND SUBSTR(" (ocman--sql-quote dir) ", 1, LENGTH(worktree) + 1) = worktree || '/') "
+               "WHERE worktree = " (roster--sql-quote dir) " "
+               "OR (LENGTH(" (roster--sql-quote dir) ") > LENGTH(worktree) "
+               "AND SUBSTR(" (roster--sql-quote dir) ", 1, LENGTH(worktree) + 1) = worktree || '/') "
                "ORDER BY LENGTH(worktree) DESC;")))
-    (ocman--query-projects sql)))
+    (roster--query-projects sql)))
 
-(defun ocman--global-project ()
+(defun roster--global-project ()
   "Return the OpenCode global project plist."
   (let* ((sql (concat
                "SELECT id, worktree, COALESCE(name, '') FROM project "
                "WHERE id = 'global' LIMIT 1;")))
-    (car (ocman--query-projects sql))))
+    (car (roster--query-projects sql))))
 
-(defun ocman--project-label (project)
+(defun roster--project-label (project)
   "Return a completion label for PROJECT."
   (let ((worktree (plist-get project :worktree))
         (name (plist-get project :name)))
@@ -419,22 +419,22 @@ Loads from OpenCode and/or Claude Code per `ocman-enabled-tools'."
         (format "%s (%s)" worktree name)
       worktree)))
 
-(defun ocman--resolve-target-project (directory)
+(defun roster--resolve-target-project (directory)
   "Return the best OpenCode project for DIRECTORY.
 Prefer an exact worktree match, otherwise fall back to a parent project whose
 worktree contains DIRECTORY, and finally the global project."
-  (or (ocman--project-for-directory directory)
-      (car (ocman--projects-containing-directory directory))
-      (ocman--global-project)))
+  (or (roster--project-for-directory directory)
+      (car (roster--projects-containing-directory directory))
+      (roster--global-project)))
 
-(defun ocman--session-with-project-worktree (session-id)
+(defun roster--session-with-project-worktree (session-id)
   "Return session plist for SESSION-ID including its project worktree."
-  (when-let ((row (car (ocman--sqlite-rows
+  (when-let ((row (car (roster--sqlite-rows
                         (concat
                          "SELECT s.id, s.title, s.directory, s.project_id, "
                          "COALESCE(p.worktree, ''), COALESCE(s.time_archived, '') "
                          "FROM session s LEFT JOIN project p ON p.id = s.project_id "
-                         "WHERE s.id = " (ocman--sql-quote session-id) " LIMIT 1;")))))
+                         "WHERE s.id = " (roster--sql-quote session-id) " LIMIT 1;")))))
     (pcase-let ((`(,id ,title ,directory ,project-id ,project-worktree ,archived-raw) row))
       (list :id id
             :title (if (string-empty-p title) "(untitled)" title)
@@ -445,66 +445,66 @@ worktree contains DIRECTORY, and finally the global project."
             :project-worktree (unless (string-empty-p project-worktree)
                                 (expand-file-name project-worktree))))))
 
-(defun ocman--move-session-directory (session-id directory project-id)
+(defun roster--move-session-directory (session-id directory project-id)
   "Move SESSION-ID to DIRECTORY under PROJECT-ID."
   (let ((dir (directory-file-name (expand-file-name directory))))
-    (ocman--sqlite-exec-change-p
+    (roster--sqlite-exec-change-p
      (concat "UPDATE session SET "
-             "directory = " (ocman--sql-quote dir) ", "
-             "project_id = " (ocman--sql-quote project-id) ", "
+             "directory = " (roster--sql-quote dir) ", "
+             "project_id = " (roster--sql-quote project-id) ", "
              "time_updated = CAST(unixepoch('subsec') * 1000 AS INTEGER) "
-             "WHERE id = " (ocman--sql-quote session-id) ";"))))
+             "WHERE id = " (roster--sql-quote session-id) ";"))))
 
-(defun ocman--set-session-title (session-id title)
+(defun roster--set-session-title (session-id title)
   "Set SESSION-ID title to TITLE.
 Return non-nil when one row was updated."
-  (ocman--sqlite-exec-change-p
-   (concat "UPDATE session SET title = " (ocman--sql-quote title)
-           " WHERE id = " (ocman--sql-quote session-id) ";")))
+  (roster--sqlite-exec-change-p
+   (concat "UPDATE session SET title = " (roster--sql-quote title)
+           " WHERE id = " (roster--sql-quote session-id) ";")))
 
-(defun ocman--set-session-archived (session-id archived)
+(defun roster--set-session-archived (session-id archived)
   "Set SESSION-ID archived state to ARCHIVED.
 Return non-nil when one row was updated."
   (let ((value (if archived
                    (number-to-string (floor (* 1000 (float-time (current-time)))))
                  "NULL")))
-    (ocman--sqlite-exec-change-p
+    (roster--sqlite-exec-change-p
      (concat "UPDATE session SET time_archived = " value
-             " WHERE id = " (ocman--sql-quote session-id) ";"))))
+             " WHERE id = " (roster--sql-quote session-id) ";"))))
 
-(defun ocman--session-display-title (session)
+(defun roster--session-display-title (session)
   "Return display title for SESSION."
-  (if (ocman--session-archived-p session)
+  (if (roster--session-archived-p session)
       (format "%s [archived]" (plist-get session :title))
     (plist-get session :title)))
 
-(defun ocman--session-state (session)
+(defun roster--session-state (session)
   "Return display state for SESSION."
-  (if (ocman--session-archived-p session)
+  (if (roster--session-archived-p session)
       "archived"
     "active"))
 
-(defun ocman--format-time-millis (millis)
+(defun roster--format-time-millis (millis)
   "Format MILLIS since epoch for list display."
   (if (and millis (> millis 0))
       (format-time-string "%Y-%m-%d %H:%M"
                           (seconds-to-time (/ millis 1000.0)))
     ""))
 
-(defun ocman--state-face (session)
+(defun roster--state-face (session)
   "Return the face used for SESSION state."
-  (if (ocman--session-archived-p session)
-      'ocman-list-archived-face
-    'ocman-list-active-face))
+  (if (roster--session-archived-p session)
+      'roster-list-archived-face
+    'roster-list-active-face))
 
-(defun ocman--session-by-id (session-id)
+(defun roster--session-by-id (session-id)
   "Return root session plist for SESSION-ID, or nil when missing."
   (when session-id
     (seq-find (lambda (session)
                 (string= (plist-get session :id) session-id))
-              (ocman--load-sessions))))
+              (roster--load-sessions))))
 
-(defun ocman--run-command (directory command)
+(defun roster--run-command (directory command)
   "Run COMMAND in DIRECTORY and return its trimmed stdout.
 Signal a `user-error' when the command exits unsuccessfully."
   (let* ((dir (expand-file-name directory))
@@ -513,7 +513,7 @@ Signal a `user-error' when the command exits unsuccessfully."
             (if (file-directory-p dir)
                 dir
               (prog1 (expand-file-name "~")
-                (message "ocman: directory %s not found, falling back to ~" dir))))))
+                (message "roster: directory %s not found, falling back to ~" dir))))))
     (with-temp-buffer
       (let ((status (call-process-shell-command command nil t)))
         (unless (eq status 0)
@@ -523,29 +523,29 @@ Signal a `user-error' when the command exits unsuccessfully."
            (string-trim (buffer-string))))
         (string-trim (buffer-string))))))
 
-(defun ocman--opencode-delete-session (session)
+(defun roster--opencode-delete-session (session)
   "Delete OpenCode SESSION via the official CLI workflow."
   (let* ((session-id (plist-get session :id))
          (directory (plist-get session :directory))
          (command (format "%s session delete %s"
-                          ocman-opencode-command
+                          roster-opencode-command
                           (shell-quote-argument session-id))))
-    (ocman--run-command directory command)))
+    (roster--run-command directory command)))
 
 ;;; Claude Code backend
 
-(defun ocman--claude-projects-dir ()
+(defun roster--claude-projects-dir ()
   "Return the Claude Code projects directory."
-  (expand-file-name "projects" ocman-claude-dir))
+  (expand-file-name "projects" roster-claude-dir))
 
-(defun ocman--claude-sidecar-path (encoded-dir session-id)
-  "Return the path to the ocman sidecar JSON file for a Claude Code session."
-  (expand-file-name (concat session-id ".ocman.json")
-                    (expand-file-name encoded-dir (ocman--claude-projects-dir))))
+(defun roster--claude-sidecar-path (encoded-dir session-id)
+  "Return the path to the roster sidecar JSON file for a Claude Code session."
+  (expand-file-name (concat session-id ".roster.json")
+                    (expand-file-name encoded-dir (roster--claude-projects-dir))))
 
-(defun ocman--claude-read-sidecar (encoded-dir session-id)
-  "Return ocman metadata alist for a Claude Code session, or nil if no sidecar."
-  (let ((path (ocman--claude-sidecar-path encoded-dir session-id)))
+(defun roster--claude-read-sidecar (encoded-dir session-id)
+  "Return roster metadata alist for a Claude Code session, or nil if no sidecar."
+  (let ((path (roster--claude-sidecar-path encoded-dir session-id)))
     (when (file-readable-p path)
       (condition-case nil
           (let ((json-object-type 'alist)
@@ -553,16 +553,16 @@ Signal a `user-error' when the command exits unsuccessfully."
             (json-read-file path))
         (error nil)))))
 
-(defun ocman--claude-write-sidecar (encoded-dir session-id title time-archived)
-  "Write ocman sidecar JSON for a Claude Code session.
+(defun roster--claude-write-sidecar (encoded-dir session-id title time-archived)
+  "Write roster sidecar JSON for a Claude Code session.
 TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
-  (let ((path (ocman--claude-sidecar-path encoded-dir session-id))
+  (let ((path (roster--claude-sidecar-path encoded-dir session-id))
         (data (append (when title `(("title" . ,title)))
                       (when time-archived `(("time_archived" . ,time-archived))))))
     (with-temp-file path
       (insert (json-encode data)))))
 
-(defun ocman--claude-read-json (string)
+(defun roster--claude-read-json (string)
   "Parse JSON STRING as a plist, or return nil on failure."
   (condition-case nil
       (let ((json-object-type 'plist)
@@ -573,7 +573,7 @@ TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
         (json-read-from-string string))
     (error nil)))
 
-(defun ocman--claude-content-text (content)
+(defun roster--claude-content-text (content)
   "Return the first useful text string from Claude CONTENT."
   (cond
    ((and (stringp content)
@@ -589,7 +589,7 @@ TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
               (throw 'found text)))))
       nil))))
 
-(defun ocman--claude-update-meta-from-object (obj slug cwd title-candidate)
+(defun roster--claude-update-meta-from-object (obj slug cwd title-candidate)
   "Update Claude metadata from OBJ.
 Return a plist with keys :slug, :cwd, and :title-candidate."
   (let ((new-slug (or slug (plist-get obj :slug)))
@@ -602,13 +602,13 @@ Return a plist with keys :slug, :cwd, and :title-candidate."
             (setq new-cwd value))))
       (unless new-title
         (setq new-title
-              (ocman--claude-content-text
+              (roster--claude-content-text
                (plist-get (plist-get obj :message) :content)))))
     (list :slug new-slug
           :cwd new-cwd
           :title-candidate new-title)))
 
-(defun ocman--claude-title (meta sidecar)
+(defun roster--claude-title (meta sidecar)
   "Return display title derived from META and SIDECAR."
   (let ((slug (plist-get meta :slug))
         (candidate (plist-get meta :title-candidate))
@@ -621,17 +621,17 @@ Return a plist with keys :slug, :cwd, and :title-candidate."
             candidate))
         "(untitled)")))
 
-(defun ocman--claude-session-from-file (encoded-dir path)
+(defun roster--claude-session-from-file (encoded-dir path)
   "Return unified Claude session plist for ENCODED-DIR and JSONL PATH."
   (let* ((session-id (file-name-sans-extension (file-name-nondirectory path)))
-         (meta (ocman--claude-parse-jsonl path)))
+         (meta (roster--claude-parse-jsonl path)))
     (when meta
-      (let* ((sidecar (ocman--claude-read-sidecar encoded-dir session-id))
+      (let* ((sidecar (roster--claude-read-sidecar encoded-dir session-id))
              (cwd (plist-get meta :cwd))
              (time-archived (let ((value (cdr (assoc "time_archived" sidecar))))
                               (when (numberp value) value))))
         (list :id session-id
-              :title (ocman--claude-title meta sidecar)
+              :title (roster--claude-title meta sidecar)
               :directory (expand-file-name (if (string-empty-p cwd) "~" cwd))
               :project-id encoded-dir
               :time-updated (plist-get meta :time-updated)
@@ -639,22 +639,22 @@ Return a plist with keys :slug, :cwd, and :title-candidate."
               :tool 'claude
               :encoded-dir encoded-dir)))))
 
-(defun ocman--claude-parse-jsonl (path)
+(defun roster--claude-parse-jsonl (path)
   "Return metadata plist from the head of a Claude Code JSONL file at PATH.
 Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
 :title-candidate, and :time-updated (file mtime in milliseconds)."
   (condition-case nil
       (let (slug cwd title-candidate)
         (with-temp-buffer
-          (insert-file-contents path nil 0 ocman--claude-jsonl-read-limit)
+          (insert-file-contents path nil 0 roster--claude-jsonl-read-limit)
           (goto-char (point-min))
           (while (and (not (eobp))
                       (not (and slug cwd title-candidate)))
             (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
-                   (obj (ocman--claude-read-json line)))
+                   (obj (roster--claude-read-json line)))
               (when obj
                 (pcase-let ((`(:slug ,new-slug :cwd ,new-cwd :title-candidate ,new-title)
-                             (ocman--claude-update-meta-from-object obj slug cwd title-candidate)))
+                             (roster--claude-update-meta-from-object obj slug cwd title-candidate)))
                   (setq slug new-slug
                         cwd new-cwd
                         title-candidate new-title))))
@@ -670,112 +670,112 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
                 :time-updated time-updated)))
     (error nil)))
 
-(defun ocman--claude-load-sessions ()
+(defun roster--claude-load-sessions ()
   "Return Claude Code sessions as a list of unified session plists."
-  (let ((projects-dir (ocman--claude-projects-dir)))
+  (let ((projects-dir (roster--claude-projects-dir)))
     (when (file-directory-p projects-dir)
       (delq nil
             (mapcar (lambda (entry)
-                      (ocman--claude-session-from-file (car entry) (cdr entry)))
-                    (ocman--claude-jsonl-files projects-dir))))))
+                      (roster--claude-session-from-file (car entry) (cdr entry)))
+                    (roster--claude-jsonl-files projects-dir))))))
 
-(defun ocman--claude-delete-session (session)
-  "Delete a Claude Code SESSION's JSONL file and ocman sidecar."
+(defun roster--claude-delete-session (session)
+  "Delete a Claude Code SESSION's JSONL file and roster sidecar."
   (let* ((session-id (plist-get session :id))
          (encoded-dir (plist-get session :encoded-dir))
-         (dir (expand-file-name encoded-dir (ocman--claude-projects-dir)))
+         (dir (expand-file-name encoded-dir (roster--claude-projects-dir)))
          (jsonl (expand-file-name (concat session-id ".jsonl") dir))
-         (sidecar (ocman--claude-sidecar-path encoded-dir session-id)))
+         (sidecar (roster--claude-sidecar-path encoded-dir session-id)))
     (when (file-exists-p jsonl)
       (delete-file jsonl))
     (when (file-exists-p sidecar)
       (delete-file sidecar))))
 
-(defun ocman--claude-rename-session-command (session)
-  "Rename a Claude Code SESSION via its ocman sidecar; return non-nil on change."
+(defun roster--claude-rename-session-command (session)
+  "Rename a Claude Code SESSION via its roster sidecar; return non-nil on change."
   (let* ((session-id (plist-get session :id))
          (encoded-dir (plist-get session :encoded-dir))
-         (old-title (ocman--session-title session))
-         (new-title (ocman--read-session-title session)))
+         (old-title (roster--session-title session))
+         (new-title (roster--read-session-title session)))
     (if (string= old-title new-title)
         (progn (message "Session %s already uses that title" session-id) nil)
-      (let ((sidecar (ocman--claude-read-sidecar encoded-dir session-id)))
-        (ocman--claude-write-sidecar
+      (let ((sidecar (roster--claude-read-sidecar encoded-dir session-id)))
+        (roster--claude-write-sidecar
          encoded-dir session-id
          new-title
          (when sidecar (cdr (assoc "time_archived" sidecar))))
         (message "Renamed session %s to %s" session-id new-title)
         t))))
 
-(defun ocman--claude-set-archived-command (session archived)
+(defun roster--claude-set-archived-command (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED; return non-nil on change."
   (let* ((session-id (plist-get session :id))
          (encoded-dir (plist-get session :encoded-dir))
          (title (plist-get session :title))
          (verb (if archived "Archive" "Unarchive")))
     (when (yes-or-no-p (format "%s Claude session '%s' (%s)? " verb title session-id))
-      (let* ((sidecar (ocman--claude-read-sidecar encoded-dir session-id))
+      (let* ((sidecar (roster--claude-read-sidecar encoded-dir session-id))
              (old-title (when sidecar (cdr (assoc "title" sidecar))))
              (new-archived (when archived
                              (floor (* 1000 (float-time (current-time)))))))
-        (ocman--claude-write-sidecar encoded-dir session-id old-title new-archived)
+        (roster--claude-write-sidecar encoded-dir session-id old-title new-archived)
         (message "%sd session %s" verb session-id)
         t))))
 
 ;;; Tool helpers
 
-(defun ocman--tool-label (session)
+(defun roster--tool-label (session)
   "Return the short tool tag string for SESSION."
-  (pcase (ocman--session-tool session)
+  (pcase (roster--session-tool session)
     ('claude "CC")
     (_        "OC")))
 
-(defun ocman--tool-face (session)
+(defun roster--tool-face (session)
   "Return a face spec for SESSION's tool tag using only the foreground color."
-  (let ((base (pcase (ocman--session-tool session)
-                ('claude 'ocman-list-tool-claude-face)
-                (_        'ocman-list-tool-opencode-face))))
+  (let ((base (pcase (roster--session-tool session)
+                ('claude 'roster-list-tool-claude-face)
+                (_        'roster-list-tool-opencode-face))))
     `(:foreground ,(face-foreground base nil 'default))))
 
-(defun ocman--session-command (session)
+(defun roster--session-command (session)
   "Return the shell command used to resume SESSION."
-  (pcase (ocman--session-tool session)
+  (pcase (roster--session-tool session)
     ('claude
      (format "%s -r %s"
-             ocman-claude-command
-             (shell-quote-argument (ocman--session-id session))))
+             roster-claude-command
+             (shell-quote-argument (roster--session-id session))))
     (_
      (format "%s -s %s"
-             ocman-opencode-command
-             (shell-quote-argument (ocman--session-id session))))))
+             roster-opencode-command
+             (shell-quote-argument (roster--session-id session))))))
 
-(defun ocman--new-session-command (tool)
+(defun roster--new-session-command (tool)
   "Return the command used to create a new TOOL session."
   (pcase tool
-    ('claude ocman-claude-command)
-    (_ ocman-opencode-command)))
+    ('claude roster-claude-command)
+    (_ roster-opencode-command)))
 
-(defun ocman--select-tool-for-new-session ()
+(defun roster--select-tool-for-new-session ()
   "Return the tool symbol to use for a new session."
-  (if (cdr ocman-enabled-tools)
+  (if (cdr roster-enabled-tools)
       (intern (completing-read
                "Tool: "
-               (mapcar #'symbol-name ocman-enabled-tools)
+               (mapcar #'symbol-name roster-enabled-tools)
                nil t nil nil
-               (symbol-name ocman-default-new-session-tool)))
-    (or (car ocman-enabled-tools) 'opencode)))
+               (symbol-name roster-default-new-session-tool)))
+    (or (car roster-enabled-tools) 'opencode)))
 
-(defun ocman--session-labels (sessions)
+(defun roster--session-labels (sessions)
   "Build completion labels for SESSIONS.
 Labels use title only. Duplicate titles are numbered as (1), (2), (3)."
   (let ((totals (make-hash-table :test #'equal))
         (seen (make-hash-table :test #'equal))
         labels)
     (dolist (s sessions)
-      (let ((title (ocman--session-display-title s)))
+      (let ((title (roster--session-display-title s)))
         (puthash title (1+ (gethash title totals 0)) totals)))
     (dolist (s sessions)
-      (let* ((title (ocman--session-display-title s))
+      (let* ((title (roster--session-display-title s))
              (total (gethash title totals 0))
              (idx (1+ (gethash title seen 0)))
              (label (if (> total 1)
@@ -785,45 +785,45 @@ Labels use title only. Duplicate titles are numbered as (1), (2), (3)."
         (push (cons label s) labels)))
     (nreverse labels)))
 
-(defun ocman--ensure-session-title (title)
+(defun roster--ensure-session-title (title)
   "Return trimmed TITLE or signal a `user-error'."
   (let ((value (string-trim title)))
     (when (string-empty-p value)
       (user-error "Session title cannot be empty"))
     value))
 
-(defun ocman--read-session-title (session)
+(defun roster--read-session-title (session)
   "Prompt for a new title for SESSION and return it.
 The return value is trimmed and guaranteed non-empty."
-  (ocman--ensure-session-title
-   (read-string (format "Rename session (%s): " (ocman--session-title session))
-                (ocman--session-title session))))
+  (roster--ensure-session-title
+   (read-string (format "Rename session (%s): " (roster--session-title session))
+                (roster--session-title session))))
 
-(defun ocman--session-annotation (candidate)
+(defun roster--session-annotation (candidate)
   "Return shadow annotation for completion CANDIDATE."
-  (let ((dir (alist-get candidate ocman--completion-directory-map nil nil #'string=)))
+  (let ((dir (alist-get candidate roster--completion-directory-map nil nil #'string=)))
     (when dir
       (concat " " (propertize dir 'face 'shadow)))))
 
-(defun ocman--select-session (sessions prompt)
+(defun roster--select-session (sessions prompt)
   "Ask user to select from SESSIONS with PROMPT.
 Return the selected session plist."
-  (let* ((table (ocman--session-labels sessions))
-         (ocman--completion-directory-map
+  (let* ((table (roster--session-labels sessions))
+         (roster--completion-directory-map
           (mapcar (lambda (pair)
                     (cons (car pair) (plist-get (cdr pair) :directory)))
                   table))
          (completion-extra-properties
-          '(:annotation-function ocman--session-annotation))
+          '(:annotation-function roster--session-annotation))
          (choice (completing-read prompt table nil t)))
     (cdr (assoc choice table))))
 
-(defun ocman--directory-prefix-p (dir parent)
+(defun roster--directory-prefix-p (dir parent)
   "Return non-nil when DIR is within PARENT."
   (string-prefix-p (file-name-as-directory (expand-file-name parent))
                    (file-name-as-directory (expand-file-name dir))))
 
-(defun ocman--project-scope-directory ()
+(defun roster--project-scope-directory ()
   "Return project root for current directory, or current directory itself.
 If `default-directory' belongs to a project, return that project root;
 otherwise return `default-directory'."
@@ -831,143 +831,143 @@ otherwise return `default-directory'."
           (root (when proj (project-root proj))))
     (expand-file-name (or root default-directory))))
 
-(defun ocman--project-scoped-sessions (sessions)
+(defun roster--project-scoped-sessions (sessions)
   "Return SESSIONS within the current project scope."
-  (let ((scope (ocman--project-scope-directory)))
+  (let ((scope (roster--project-scope-directory)))
     (seq-filter
      (lambda (session)
-       (ocman--directory-prefix-p (plist-get session :directory) scope))
+       (roster--directory-prefix-p (plist-get session :directory) scope))
      sessions)))
 
-(defun ocman--start-new-session-with-directory-prompt ()
+(defun roster--start-new-session-with-directory-prompt ()
   "Prompt for a directory and optional tool, then start a new session."
   (let* ((dir (read-directory-name "Directory for new session: "
                                    default-directory nil t))
-         (tool (ocman--select-tool-for-new-session)))
-    (funcall ocman-terminal-function dir (ocman--new-session-command tool))))
+         (tool (roster--select-tool-for-new-session)))
+    (funcall roster-terminal-function dir (roster--new-session-command tool))))
 
-(defun ocman--resume-session (session &optional jump)
+(defun roster--resume-session (session &optional jump)
   "Resume SESSION in a terminal window.
 When JUMP is non-nil, open the session directory in Dired first."
-  (let ((directory (ocman--session-directory session)))
+  (let ((directory (roster--session-directory session)))
     (when jump
       (dired directory))
-    (funcall ocman-terminal-function directory (ocman--session-command session))))
+    (funcall roster-terminal-function directory (roster--session-command session))))
 
-(defun ocman--list-sessions ()
-  "Return sessions for the current `ocman' list buffer."
-  (unless ocman-list-source-function
-    (user-error "No session source configured for this ocman buffer"))
-  (let ((sessions (funcall ocman-list-source-function)))
-    (if ocman-list-show-archived
+(defun roster--list-sessions ()
+  "Return sessions for the current `roster' list buffer."
+  (unless roster-list-source-function
+    (user-error "No session source configured for this roster buffer"))
+  (let ((sessions (funcall roster-list-source-function)))
+    (if roster-list-show-archived
         sessions
-      (ocman--active-sessions sessions))))
+      (roster--active-sessions sessions))))
 
-(defun ocman--list-entry (session)
+(defun roster--list-entry (session)
   "Build one tabulated list entry for SESSION."
   (let ((directory (plist-get session :directory)))
     (list (plist-get session :id)
           (vector
-           (concat "  " (propertize (ocman--session-title session) 'face 'ocman-list-title-face))
-           (propertize (ocman--tool-label session) 'face (ocman--tool-face session))
-           (propertize (upcase (ocman--session-state session)) 'face (ocman--state-face session))
+           (concat "  " (propertize (roster--session-title session) 'face 'roster-list-title-face))
+           (propertize (roster--tool-label session) 'face (roster--tool-face session))
+           (propertize (upcase (roster--session-state session)) 'face (roster--state-face session))
            (propertize (file-name-nondirectory (directory-file-name directory))
-                       'face 'ocman-list-project-face)
-           (propertize directory 'face 'ocman-list-directory-face)
-           (propertize (ocman--format-time-millis (plist-get session :time-updated))
-                       'face 'ocman-list-time-face)))))
+                       'face 'roster-list-project-face)
+           (propertize directory 'face 'roster-list-directory-face)
+           (propertize (roster--format-time-millis (plist-get session :time-updated))
+                       'face 'roster-list-time-face)))))
 
-(defun ocman--list-refresh ()
-  "Refresh `tabulated-list-entries' for the current `ocman' buffer."
+(defun roster--list-refresh ()
+  "Refresh `tabulated-list-entries' for the current `roster' buffer."
   (setq tabulated-list-entries
-        (mapcar #'ocman--list-entry (ocman--list-sessions))))
+        (mapcar #'roster--list-entry (roster--list-sessions))))
 
-(defun ocman--session-at-point ()
-  "Return the session at point in an `ocman' list buffer."
+(defun roster--session-at-point ()
+  "Return the session at point in an `roster' list buffer."
   (let ((session-id (tabulated-list-get-id)))
     (unless session-id
       (user-error "No session on this line"))
-    (or (ocman--session-by-id session-id)
+    (or (roster--session-by-id session-id)
         (user-error "Session %s no longer exists" session-id))))
 
-(defun ocman-list-refresh ()
-  "Refresh the current `ocman' list buffer."
+(defun roster-list-refresh ()
+  "Refresh the current `roster' list buffer."
   (interactive)
   (revert-buffer))
 
-(defun ocman-list-toggle-archived ()
+(defun roster-list-toggle-archived ()
   "Toggle whether archived sessions are shown in the current list."
   (interactive)
-  (setq ocman-list-show-archived (not ocman-list-show-archived))
+  (setq roster-list-show-archived (not roster-list-show-archived))
   (tabulated-list-revert)
   (message "%s archived sessions"
-           (if ocman-list-show-archived "Showing" "Hiding")))
+           (if roster-list-show-archived "Showing" "Hiding")))
 
-(defun ocman-list-resume (&optional arg)
+(defun roster-list-resume (&optional arg)
   "Resume the session on the current line.
 With a prefix argument, open the session directory in Dired first."
   (interactive "P")
-  (ocman--resume-session (ocman--session-at-point) arg))
+  (roster--resume-session (roster--session-at-point) arg))
 
-(defun ocman-list-open-directory ()
+(defun roster-list-open-directory ()
   "Open the current session's directory in Dired."
   (interactive)
-  (dired (plist-get (ocman--session-at-point) :directory)))
+  (dired (plist-get (roster--session-at-point) :directory)))
 
-(defun ocman-list-rename ()
+(defun roster-list-rename ()
   "Rename the session on the current line."
   (interactive)
-  (when (ocman--rename-session-command (ocman--session-at-point))
+  (when (roster--rename-session-command (roster--session-at-point))
     (tabulated-list-revert)))
 
-(defun ocman-list-toggle-archive ()
+(defun roster-list-toggle-archive ()
   "Toggle archived state for the session on the current line."
   (interactive)
-  (let* ((session (ocman--session-at-point))
-         (archived (not (ocman--session-archived-p session))))
-    (when (ocman--set-session-archived-command session archived)
+  (let* ((session (roster--session-at-point))
+         (archived (not (roster--session-archived-p session))))
+    (when (roster--set-session-archived-command session archived)
       (tabulated-list-revert))))
 
-(defun ocman-list-move-directory ()
+(defun roster-list-move-directory ()
   "Move the session on the current line to another project directory."
   (interactive)
-  (when (ocman--update-session-directory-command (ocman--session-at-point))
+  (when (roster--update-session-directory-command (roster--session-at-point))
     (tabulated-list-revert)))
 
-(defun ocman-list-delete ()
+(defun roster-list-delete ()
   "Delete the session on the current line."
   (interactive)
   (let ((line (line-number-at-pos)))
-    (when (ocman--delete-session-command (ocman--session-at-point))
+    (when (roster--delete-session-command (roster--session-at-point))
       (tabulated-list-revert)
       (goto-char (point-min))
       (forward-line (max 0 (1- line)))
       (when (eobp)
         (forward-line -1)))))
 
-(defun ocman-list-new-session ()
+(defun roster-list-new-session ()
   "Start a new session from the list buffer."
   (interactive)
-  (ocman--start-new-session-with-directory-prompt))
+  (roster--start-new-session-with-directory-prompt))
 
-(defvar ocman-list-mode-map
+(defvar roster-list-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "RET") #'ocman-list-resume)
-    (define-key map (kbd "e") #'ocman-list-resume)
-    (define-key map (kbd "d") #'ocman-list-delete)
-    (define-key map (kbd "r") #'ocman-list-rename)
-    (define-key map (kbd "a") #'ocman-list-toggle-archive)
-    (define-key map (kbd "R") #'ocman-list-move-directory)
-    (define-key map (kbd "o") #'ocman-list-open-directory)
-    (define-key map (kbd "c") #'ocman-list-new-session)
-    (define-key map (kbd "g") #'ocman-list-refresh)
-    (define-key map (kbd "t") #'ocman-list-toggle-archived)
+    (define-key map (kbd "RET") #'roster-list-resume)
+    (define-key map (kbd "e") #'roster-list-resume)
+    (define-key map (kbd "d") #'roster-list-delete)
+    (define-key map (kbd "r") #'roster-list-rename)
+    (define-key map (kbd "a") #'roster-list-toggle-archive)
+    (define-key map (kbd "R") #'roster-list-move-directory)
+    (define-key map (kbd "o") #'roster-list-open-directory)
+    (define-key map (kbd "c") #'roster-list-new-session)
+    (define-key map (kbd "g") #'roster-list-refresh)
+    (define-key map (kbd "t") #'roster-list-toggle-archived)
     (define-key map (kbd "q") #'quit-window)
     map)
-  "Keymap for `ocman-list-mode'.")
+  "Keymap for `roster-list-mode'.")
 
-(define-derived-mode ocman-list-mode tabulated-list-mode "ocman"
+(define-derived-mode roster-list-mode tabulated-list-mode "roster"
   "Major mode for managing AI coding sessions."
   (setq tabulated-list-format [("Title"     28 t)
                                ("Tool"       4 t)
@@ -977,86 +977,86 @@ With a prefix argument, open the session directory in Dired first."
                                ("Updated"   16 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Updated" . t))
-  (add-hook 'tabulated-list-revert-hook #'ocman--list-refresh nil t)
+  (add-hook 'tabulated-list-revert-hook #'roster--list-refresh nil t)
   (tabulated-list-init-header))
 
-(defun ocman--open-list-buffer (buffer-name source-function &optional include-archived)
-  "Open an `ocman' list BUFFER-NAME using SOURCE-FUNCTION.
+(defun roster--open-list-buffer (buffer-name source-function &optional include-archived)
+  "Open an `roster' list BUFFER-NAME using SOURCE-FUNCTION.
 When INCLUDE-ARCHIVED is non-nil, archived sessions are shown initially.
-When omitted or nil, the value of `ocman-list-include-archived' is used."
+When omitted or nil, the value of `roster-list-include-archived' is used."
   (let ((buffer (get-buffer-create buffer-name)))
     (with-current-buffer buffer
-      (ocman-list-mode)
-      (setq-local ocman-list-source-function source-function)
-      (setq-local ocman-list-show-archived (if (null include-archived)
-                                               ocman-list-include-archived
+      (roster-list-mode)
+      (setq-local roster-list-source-function source-function)
+      (setq-local roster-list-show-archived (if (null include-archived)
+                                               roster-list-include-archived
                                              include-archived))
       (setq-local header-line-format
                   "RET/e resume, d delete, r rename, a archive, R move, o dired, c create, t archived, g refresh")
       (tabulated-list-revert))
     (pop-to-buffer buffer)))
 
-(defun ocman--opencode-rename-session-command (session)
+(defun roster--opencode-rename-session-command (session)
   "Rename an OpenCode SESSION via SQLite and return non-nil when changed."
   (let* ((session-id (plist-get session :id))
-         (old-title (ocman--session-title session))
-         (new-title (ocman--read-session-title session)))
+         (old-title (roster--session-title session))
+         (new-title (roster--read-session-title session)))
     (if (string= old-title new-title)
         (progn
           (message "Session %s already uses that title" session-id)
           nil)
-      (unless (ocman--set-session-title session-id new-title)
+      (unless (roster--set-session-title session-id new-title)
         (user-error "No session updated for id %s" session-id))
-      (let ((updated (ocman--session-with-project-worktree session-id)))
+      (let ((updated (roster--session-with-project-worktree session-id)))
         (unless (and updated
                      (string= (plist-get updated :title) new-title))
           (user-error "Session %s failed title verification" session-id))
         (message "Renamed session %s to %s" session-id new-title)
         t))))
 
-(defun ocman--rename-session-command (session)
+(defun roster--rename-session-command (session)
   "Rename SESSION and return non-nil when the title changes."
   (pcase (plist-get session :tool)
-    ('claude (ocman--claude-rename-session-command session))
-    (_       (ocman--opencode-rename-session-command session))))
+    ('claude (roster--claude-rename-session-command session))
+    (_       (roster--opencode-rename-session-command session))))
 
-(defun ocman--opencode-set-archived-command (session archived)
+(defun roster--opencode-set-archived-command (session archived)
   "Set an OpenCode SESSION archived state to ARCHIVED; return non-nil on change."
-  (let* ((session-id (ocman--session-id session))
-         (title (ocman--session-title session))
+  (let* ((session-id (roster--session-id session))
+         (title (roster--session-title session))
          (verb (if archived "Archive" "Unarchive")))
     (when (yes-or-no-p (format "%s OpenCode session '%s' (%s)? " verb title session-id))
-      (unless (ocman--set-session-archived session-id archived)
+      (unless (roster--set-session-archived session-id archived)
         (user-error "No session updated for id %s" session-id))
-      (let ((updated (ocman--session-with-project-worktree session-id)))
+      (let ((updated (roster--session-with-project-worktree session-id)))
         (unless (and updated
-                     (eq (ocman--session-archived-p updated) archived))
+                     (eq (roster--session-archived-p updated) archived))
           (user-error "Session %s failed %s verification" session-id (downcase verb)))
         (message "%sd session %s" verb session-id)
         t))))
 
-(defun ocman--set-session-archived-command (session archived)
+(defun roster--set-session-archived-command (session archived)
   "Set SESSION archived state to ARCHIVED and return non-nil on change."
   (pcase (plist-get session :tool)
-    ('claude (ocman--claude-set-archived-command session archived))
-    (_       (ocman--opencode-set-archived-command session archived))))
+    ('claude (roster--claude-set-archived-command session archived))
+    (_       (roster--opencode-set-archived-command session archived))))
 
-(defun ocman--delete-session-command (session)
+(defun roster--delete-session-command (session)
   "Delete SESSION and return non-nil on success."
-  (let ((session-id (ocman--session-id session))
-        (title (ocman--session-title session))
-        (directory (ocman--session-directory session)))
+  (let ((session-id (roster--session-id session))
+        (title (roster--session-title session))
+        (directory (roster--session-directory session)))
     (when (yes-or-no-p (format "Delete session '%s' (%s)? " title session-id))
       (pcase (plist-get session :tool)
-        ('claude (ocman--claude-delete-session session))
-        (_       (ocman--opencode-delete-session session)))
+        ('claude (roster--claude-delete-session session))
+        (_       (roster--opencode-delete-session session)))
       (message "Deleted session %s from %s" session-id directory)
       t)))
 
-(defun ocman--verify-moved-session (session-id directory project-id project-worktree)
+(defun roster--verify-moved-session (session-id directory project-id project-worktree)
   "Signal when SESSION-ID does not match DIRECTORY and PROJECT-ID.
 PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
-  (let ((updated (ocman--session-with-project-worktree session-id)))
+  (let ((updated (roster--session-with-project-worktree session-id)))
     (unless updated
       (user-error "Updated session %s could not be reloaded" session-id))
     (unless (and (string= (plist-get updated :directory) directory)
@@ -1064,20 +1064,20 @@ PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
                  (string= (or (plist-get updated :project-worktree) "") project-worktree))
       (user-error "Session %s failed post-update consistency checks" session-id))))
 
-(defun ocman--target-project-for-directory (directory)
+(defun roster--target-project-for-directory (directory)
   "Return the resolved OpenCode project for DIRECTORY or signal a `user-error'."
-  (or (ocman--resolve-target-project directory)
+  (or (roster--resolve-target-project directory)
       (user-error
        (concat
         "No OpenCode project matches %s. OpenCode only stays consistent when the target "
         "directory already exists as a project worktree.")
        directory)))
 
-(defun ocman--move-session-confirmed-p (session-id old-dir new-dir)
+(defun roster--move-session-confirmed-p (session-id old-dir new-dir)
   "Return non-nil when the user confirms moving SESSION-ID from OLD-DIR to NEW-DIR."
   (yes-or-no-p (format "Move session %s from %s to %s? " session-id old-dir new-dir)))
 
-(defun ocman--update-session-directory-command (session)
+(defun roster--update-session-directory-command (session)
   "Move SESSION to another known OpenCode project directory.
 Signals a `user-error' for Claude Code sessions, which are not movable."
   (when (eq (plist-get session :tool) 'claude)
@@ -1091,19 +1091,19 @@ Signals a `user-error' for Claude Code sessions, which are not movable."
                                           old-dir nil t)))))
     (unless (file-directory-p new-dir)
       (user-error "Directory does not exist: %s" new-dir))
-    (let* ((target-project (ocman--target-project-for-directory new-dir))
+    (let* ((target-project (roster--target-project-for-directory new-dir))
            (new-project-id (plist-get target-project :id)))
       (cond
        ((and (string= old-dir new-dir)
              (string= old-project-id new-project-id))
         (message "Session %s already points to %s" session-id new-dir)
         nil)
-       ((not (ocman--move-session-confirmed-p session-id old-dir new-dir))
+       ((not (roster--move-session-confirmed-p session-id old-dir new-dir))
         nil)
        (t
-        (unless (ocman--move-session-directory session-id new-dir new-project-id)
+        (unless (roster--move-session-directory session-id new-dir new-project-id)
           (user-error "No session updated for id %s" session-id))
-        (ocman--verify-moved-session session-id new-dir new-project-id
+        (roster--verify-moved-session session-id new-dir new-project-id
                                      (plist-get target-project :worktree))
         (message
          "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
@@ -1111,122 +1111,122 @@ Signals a `user-error' for Claude Code sessions, which are not movable."
         t)))))
 
 ;;;###autoload
-(defun ocman-update-session-directory ()
+(defun roster-update-session-directory ()
   "Safely move a session to another known OpenCode project directory.
 
 This updates both `session.directory' and `session.project_id', and only
 allows targets that already exist in the OpenCode `project' table."
   (interactive)
-  (ocman--update-session-directory-command
-   (ocman--select-from-sessions
-    (ocman--load-sessions)
+  (roster--update-session-directory-command
+   (roster--select-from-sessions
+    (roster--load-sessions)
     "Select OpenCode session to move: "
     "No OpenCode sessions found")))
 
 ;;;###autoload
-(defun ocman-rename-session ()
+(defun roster-rename-session ()
   "Rename an existing session."
   (interactive)
-  (ocman--rename-session-command
-   (ocman--select-from-sessions
-    (ocman--active-sessions (ocman--load-sessions))
+  (roster--rename-session-command
+   (roster--select-from-sessions
+    (roster--active-sessions (roster--load-sessions))
     "Select session to rename: "
     "No active sessions found")))
 
 ;;;###autoload
-(defun ocman-archive-session ()
+(defun roster-archive-session ()
   "Archive an active session."
   (interactive)
-  (ocman--set-session-archived-command
-   (ocman--select-from-sessions
-    (ocman--active-sessions (ocman--load-sessions))
+  (roster--set-session-archived-command
+   (roster--select-from-sessions
+    (roster--active-sessions (roster--load-sessions))
     "Select session to archive: "
     "No active sessions found")
    t))
 
 ;;;###autoload
-(defun ocman-unarchive-session ()
+(defun roster-unarchive-session ()
   "Unarchive an existing session."
   (interactive)
-  (ocman--set-session-archived-command
-   (ocman--select-from-sessions
-    (ocman--archived-sessions (ocman--load-sessions))
+  (roster--set-session-archived-command
+   (roster--select-from-sessions
+    (roster--archived-sessions (roster--load-sessions))
     "Select session to unarchive: "
     "No archived sessions found")
    nil))
 
 ;;;###autoload
-(defun ocman-delete-session ()
+(defun roster-delete-session ()
   "Delete an existing session."
   (interactive)
-  (ocman--delete-session-command
-   (ocman--select-from-sessions
-    (ocman--load-sessions)
+  (roster--delete-session-command
+   (roster--select-from-sessions
+    (roster--load-sessions)
     "Select session to delete: "
     "No sessions found")))
 
 ;;;###autoload
-(defun ocman-list-sessions ()
+(defun roster-list-sessions ()
   "Open a Dired-like buffer for managing sessions."
   (interactive)
-  (ocman--open-list-buffer ocman-list-buffer-name #'ocman--load-sessions))
+  (roster--open-list-buffer roster-list-buffer-name #'roster--load-sessions))
 
 ;;;###autoload
-(defun ocman-list-project-sessions ()
+(defun roster-list-project-sessions ()
   "Open a Dired-like buffer for sessions in the current project scope."
   (interactive)
-  (let ((scope (ocman--project-scope-directory)))
-    (ocman--open-list-buffer
-     (format "%s<%s>" ocman-list-buffer-name (file-name-nondirectory (directory-file-name scope)))
+  (let ((scope (roster--project-scope-directory)))
+    (roster--open-list-buffer
+     (format "%s<%s>" roster-list-buffer-name (file-name-nondirectory (directory-file-name scope)))
      (lambda ()
-       (ocman--project-scoped-sessions (ocman--load-sessions))))))
+       (roster--project-scoped-sessions (roster--load-sessions))))))
 
 ;;;###autoload
-(defun ocman-open-session (&optional arg)
+(defun roster-open-session (&optional arg)
   "Choose a session and resume it.
 With a prefix argument, open the session directory in Dired first.
 If there are no sessions, prompt for a directory and start a new one."
   (interactive "P")
-  (let ((sessions (ocman--load-sessions)))
+  (let ((sessions (roster--load-sessions)))
     (if sessions
-        (ocman--resume-session
-         (ocman--select-session sessions "Select session to resume: ")
+        (roster--resume-session
+         (roster--select-session sessions "Select session to resume: ")
          arg)
-      (ocman--start-new-session-with-directory-prompt))))
+      (roster--start-new-session-with-directory-prompt))))
 
 ;;;###autoload
-(defun ocman-open-session-project (&optional arg)
+(defun roster-open-session-project (&optional arg)
   "Choose and resume a session under the current project scope.
 If current directory belongs to a project, scope is project root and subdirs.
 Otherwise scope is current directory and subdirs.
 With a prefix argument, open the session directory in Dired first.
 If no matching session exists, prompt for a directory and start a new one."
   (interactive "P")
-  (let* ((sessions (ocman--load-sessions))
-         (scope (ocman--project-scope-directory))
-         (scoped-sessions (ocman--project-scoped-sessions sessions)))
+  (let* ((sessions (roster--load-sessions))
+         (scope (roster--project-scope-directory))
+         (scoped-sessions (roster--project-scoped-sessions sessions)))
     (if scoped-sessions
-        (ocman--resume-session
-         (ocman--select-session scoped-sessions
+        (roster--resume-session
+         (roster--select-session scoped-sessions
                                  (format "Select session in project scope (%s): " scope))
          arg)
-      (ocman--start-new-session-with-directory-prompt))))
+      (roster--start-new-session-with-directory-prompt))))
 
 ;;;###autoload
-(defun ocman-open-latest-session-project ()
+(defun roster-open-latest-session-project ()
   "Resume the latest active session in the current project scope.
 If none exists, prompt for a directory and start a new one."
   (interactive)
-  (let* ((sessions (ocman--load-sessions))
-         (scoped-sessions (ocman--active-sessions
-                           (ocman--project-scoped-sessions sessions))))
+  (let* ((sessions (roster--load-sessions))
+         (scoped-sessions (roster--active-sessions
+                           (roster--project-scoped-sessions sessions))))
     (if scoped-sessions
-        (ocman--resume-session (car scoped-sessions))
-      (ocman--start-new-session-with-directory-prompt))))
+        (roster--resume-session (car scoped-sessions))
+      (roster--start-new-session-with-directory-prompt))))
 
-(define-obsolete-function-alias 'ocman-open-session-here
-  'ocman-open-session-project "0.1.1")
+(define-obsolete-function-alias 'roster-open-session-here
+  'roster-open-session-project "0.1.1")
 
-(provide 'ocman)
+(provide 'roster)
 
-;;; ocman.el ends here
+;;; roster.el ends here

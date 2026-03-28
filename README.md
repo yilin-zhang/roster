@@ -1,85 +1,84 @@
-# ocman
+# Roster
 
-`ocman` is a small Emacs helper for managing OpenCode and Claude Code sessions.
+Roster is an Emacs package for managing AI coding sessions from OpenCode and
+Claude Code.
 
-## Features
+Both tools accumulate sessions over time with no easy way to browse, resume, or
+clean them up from inside Emacs. Roster puts all sessions in a unified
+`tabulated-list-mode` buffer — tagged `OC` for OpenCode and `CC` for Claude
+Code — and lets you resume, rename, archive, delete, and move them without
+leaving your editor.
 
-- Resume any existing OpenCode or Claude Code session
-- Resume the latest session in the current project
-- Browse sessions in a Dired-like management buffer
-- Rename sessions
-- Archive and unarchive sessions
-- Delete sessions from either backend
-- Safely move OpenCode sessions to another directory while preserving project resolution
-
-## Commands
-
-- `ocman-open-session`
-- `ocman-open-session-project`
-- `ocman-open-latest-session-project`
-- `ocman-list-sessions`
-- `ocman-list-project-sessions`
-- `ocman-rename-session`
-- `ocman-archive-session`
-- `ocman-unarchive-session`
-- `ocman-delete-session`
-- `ocman-update-session-directory`
-
-## Session List UI
-
-`ocman-list-sessions` opens a tabulated management buffer for root sessions.
-`ocman-list-project-sessions` narrows that view to the current project scope.
-
-The list shows an `OC` or `CC` tag for each session.
-
-- `RET` / `e`: resume session
-- `d`: delete session
-- `r`: rename session
-- `a`: archive or unarchive session
-- `R`: move session to another known project directory
-- `o`: open session directory in Dired
-- `c`: create a new session
-- `t`: toggle archived sessions
-- `g`: refresh
-- `q`: quit the window
-
-## Example config
+## Install
 
 ```elisp
-(use-package ocman
+(use-package roster
   :ensure nil
-  :load-path "~/.emacs.d/site-lisp/ocman/"
-  :commands (ocman-open-session
-             ocman-open-session-project
-             ocman-list-sessions
-             ocman-list-project-sessions
-             ocman-open-latest-session-project
-             ocman-rename-session
-             ocman-archive-session
-             ocman-unarchive-session
-             ocman-delete-session
-             ocman-update-session-directory)
+  :load-path "~/.emacs.d/site-lisp/roster/"
+  :commands (roster-open-session
+             roster-open-session-project
+             roster-list-sessions
+             roster-list-project-sessions
+             roster-open-latest-session-project
+             roster-rename-session
+             roster-archive-session
+             roster-unarchive-session
+             roster-delete-session
+             roster-update-session-directory)
   :custom
-  (ocman-enabled-tools '(opencode claude))
-  (ocman-default-new-session-tool 'opencode)
-  (ocman-terminal-function (if (eq system-type 'darwin)
-                               #'ocman-open-in-ghostty
-                             #'ocman-open-in-emacs-terminal)))
+  (roster-enabled-tools '(opencode claude))
+  (roster-default-new-session-tool 'opencode)
+  (roster-terminal-function (if (eq system-type 'darwin)
+                               #'roster-open-in-ghostty
+                             #'roster-open-in-emacs-terminal)))
 ```
 
-If you prefer iTerm on macOS instead:
+On macOS, `roster-open-in-ghostty` and `roster-open-in-iterm` are also
+available. If you prefer iTerm:
 
 ```elisp
-(setq ocman-terminal-function #'ocman-open-in-iterm)
+(setq roster-terminal-function #'roster-open-in-iterm)
 ```
 
-On macOS, both `ocman-open-in-ghostty` and `ocman-open-in-iterm` open a new tab
-and start `opencode` there.
+## Usage
+
+### Quick commands
+
+These work without opening the session list:
+
+- `roster-open-session` — pick any session and resume it
+- `roster-open-session-project` — pick a session scoped to the current project
+- `roster-open-latest-session-project` — resume the most recent session in the current project
+- `roster-list-sessions` — open the full session list
+- `roster-list-project-sessions` — open the session list filtered to the current project
+
+### Session list
+
+`roster-list-sessions` opens a tabulated buffer showing all sessions. From
+there:
+
+| Key         | Action                                    |
+|-------------|-------------------------------------------|
+| `RET` / `e` | Resume session                            |
+| `r`         | Rename session                            |
+| `a`         | Archive or unarchive session              |
+| `d`         | Delete session                            |
+| `R`         | Move session to another project directory |
+| `o`         | Open session directory in Dired           |
+| `c`         | Create a new session                      |
+| `t`         | Toggle display of archived sessions       |
+| `g`         | Refresh                                   |
+| `q`         | Quit                                      |
+
+Directory moves (`R`) are only supported for OpenCode sessions.
 
 ## Notes
 
-- OpenCode session deletion uses `opencode session delete`; Claude Code deletion removes the local JSONL session file.
-- OpenCode rename and archive operations currently update the local OpenCode database directly to match OpenCode's internal fields.
-- Claude Code rename and archive state are stored in small `*.ocman.json` sidecar files next to the session JSONL files.
-- Directory moves are OpenCode-only.
-- Normal listings intentionally hide child/subagent sessions and only show root sessions.
+- OpenCode sessions are read from and written to the OpenCode SQLite database
+  directly.
+- Claude Code sessions are read from JSONL files under `~/.claude/projects/`.
+  Since Claude Code's database is not writable by third parties, custom titles
+  and archive state are stored in small `*.roster.json` sidecar files next to
+  each session's JSONL file.
+- Only root sessions are shown; child/subagent sessions are hidden.
+- Requires Emacs 29.1+ for built-in SQLite support.
