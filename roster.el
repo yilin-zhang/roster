@@ -759,11 +759,6 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
 
 ;;; Codex backend
 
-(defconst roster--codex-jsonl-read-limit 32768
-  "Maximum bytes read from a Codex JSONL file when parsing metadata.
-32 KB accommodates the large session_meta line (which includes skill
-instructions) and is enough to reach the first user message.")
-
 (defun roster--codex-sessions-dir ()
   "Return the Codex active sessions directory."
   (expand-file-name "sessions" roster-codex-dir))
@@ -833,13 +828,15 @@ Returns nil when the format is not recognized."
     (nreverse result)))
 
 (defun roster--codex-parse-jsonl (path)
-  "Return metadata plist from the head of a Codex JSONL file at PATH.
-Reads up to `roster--codex-jsonl-read-limit' bytes.
-Returns plist with keys :id, :cwd, :title-candidate, and :time-updated."
+  "Return metadata plist from a Codex JSONL file at PATH.
+Returns plist with keys :id, :cwd, :title-candidate, and :time-updated.
+Reads the file line by line and stops as soon as all three metadata fields
+are found, so arbitrarily large preambles (e.g. long system prompts) are
+handled without any fixed byte limit."
   (condition-case nil
       (let (session-id cwd title-candidate)
         (with-temp-buffer
-          (insert-file-contents path nil 0 roster--codex-jsonl-read-limit)
+          (insert-file-contents path)
           (goto-char (point-min))
           (while (and (not (eobp))
                       (not (and session-id cwd title-candidate)))
@@ -888,6 +885,10 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
                     (if (> (length candidate) 60)
                         (concat (substring candidate 0 57) "...")
                       candidate))
+                  (let ((dir (file-name-nondirectory
+                              (directory-file-name
+                               (expand-file-name (if (string-empty-p cwd) "~" cwd))))))
+                    (unless (string-empty-p dir) dir))
                   "(untitled)"))
              (time-archived
               (when archived
