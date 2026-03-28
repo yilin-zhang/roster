@@ -1,13 +1,13 @@
 # Roster
 
-Roster is an Emacs package for managing AI coding sessions from OpenCode and
-Claude Code.
+Roster is an Emacs package for managing AI coding sessions from OpenCode,
+Claude Code, and Codex.
 
-Both tools accumulate sessions over time with no easy way to browse, resume, or
+These tools accumulate sessions over time with no easy way to browse, resume, or
 clean them up from inside Emacs. Roster puts all sessions in a unified
-`tabulated-list-mode` buffer — tagged `OC` for OpenCode and `CC` for Claude
-Code — and lets you resume, rename, archive, delete, and move them without
-leaving your editor.
+`tabulated-list-mode` buffer — tagged `OC` for OpenCode, `CC` for Claude Code,
+and `CX` for Codex — and lets you resume, rename, archive, delete, and move
+them without leaving your editor.
 
 ## Install
 
@@ -26,7 +26,7 @@ leaving your editor.
              roster-delete-session
              roster-update-session-directory)
   :custom
-  (roster-enabled-tools '(opencode claude))
+  (roster-enabled-tools '(opencode claude codex))
   (roster-default-new-session-tool 'opencode)
   (roster-terminal-function (if (eq system-type 'darwin)
                                #'roster-open-in-ghostty
@@ -80,5 +80,9 @@ Directory moves (`R`) are only supported for OpenCode sessions.
   Since Claude Code's database is not writable by third parties, custom titles
   and archive state are stored in small `*.roster.json` sidecar files next to
   each session's JSONL file.
+- Codex sessions are read from JSONL files under `~/.codex/sessions/YYYY/MM/DD/`.
+  Archived sessions live in `~/.codex/archived_sessions/`; archiving and
+  unarchiving moves files between the two directories. Custom titles are stored
+  in `~/.codex/roster/UUID.roster.json` sidecar files.
 - Only root sessions are shown; child/subagent sessions are hidden.
 - Requires Emacs 29.1+ for built-in SQLite support.

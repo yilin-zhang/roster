@@ -80,6 +80,17 @@
   "Face for the Claude Code tool tag in `roster' lists."
   :group 'roster)
 
+(defface roster-list-tool-codex-face
+  '((t :inherit ansi-color-green))
+  "Face for the Codex tool tag in `roster' lists."
+  :group 'roster)
+
+(defface roster-list-mark-face
+  '((((background dark)) (:background "DarkGoldenrod4"))
+    (t (:background "LightYellow1")))
+  "Face for marked rows in `roster' lists."
+  :group 'roster)
+
 (defcustom roster-opencode-db-path
   (expand-file-name "~/.local/share/opencode/opencode.db")
   "Path to OpenCode SQLite database."
@@ -113,16 +124,27 @@ The function is called with two args: DIRECTORY and COMMAND."
   :type 'string
   :group 'roster)
 
-(defcustom roster-enabled-tools '(opencode claude)
+(defcustom roster-codex-dir
+  (expand-file-name "~/.codex")
+  "Path to the Codex configuration directory."
+  :type 'directory
+  :group 'roster)
+
+(defcustom roster-codex-command "codex"
+  "Codex executable name or full path."
+  :type 'string
+  :group 'roster)
+
+(defcustom roster-enabled-tools '(opencode claude codex)
   "List of tools whose sessions are shown by roster.
-Valid elements are the symbols `opencode' and `claude'."
-  :type '(set (const opencode) (const claude))
+Valid elements are the symbols `opencode', `claude', and `codex'."
+  :type '(set (const opencode) (const claude) (const codex))
   :group 'roster)
 
 (defcustom roster-default-new-session-tool 'opencode
   "Default tool when creating a new session and multiple tools are enabled.
 Must be a symbol present in `roster-enabled-tools'."
-  :type '(choice (const opencode) (const claude))
+  :type '(choice (const opencode) (const claude) (const codex))
   :group 'roster)
 
 (defvar roster--completion-directory-map nil
@@ -136,6 +158,12 @@ Must be a symbol present in `roster-enabled-tools'."
 
 (defvar-local roster-list-show-archived roster-list-include-archived
   "Whether the current `roster' list buffer shows archived sessions.")
+
+(defvar-local roster-list--marked (make-hash-table :test #'equal)
+  "Hash table of marked session IDs in the current `roster' list buffer.")
+
+(defvar-local roster-list--mark-overlays (make-hash-table :test #'equal)
+  "Hash table mapping session ID to its mark overlay in the current buffer.")
 
 (defconst roster--claude-jsonl-read-limit 8192
   "Maximum bytes read from a Claude Code JSONL file when parsing metadata.
@@ -362,7 +390,7 @@ Each plist has keys :id, :title, :directory, :project-id,
 
 (defun roster--load-sessions ()
   "Return sessions from all enabled tools as a unified list, newest-first.
-Loads from OpenCode and/or Claude Code per `roster-enabled-tools'."
+Loads from OpenCode, Claude Code, and/or Codex per `roster-enabled-tools'."
   (let (all)
     (when (roster--enabled-tool-p 'opencode)
       (condition-case err
@@ -370,6 +398,8 @@ Loads from OpenCode and/or Claude Code per `roster-enabled-tools'."
         (user-error (message "roster: OpenCode sessions unavailable: %s" (cadr err)))))
     (when (roster--enabled-tool-p 'claude)
       (setq all (nconc all (roster--claude-load-sessions))))
+    (when (roster--enabled-tool-p 'codex)
+      (setq all (nconc all (roster--codex-load-sessions))))
     (roster--sort-sessions all)))
 
 (defun roster--session-archived-p (session)
@@ -687,7 +717,7 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
          (jsonl (expand-file-name (concat session-id ".jsonl") dir))
          (sidecar (roster--claude-sidecar-path encoded-dir session-id)))
     (when (file-exists-p jsonl)
-      (delete-file jsonl))
+      (move-file-to-trash jsonl))
     (when (file-exists-p sidecar)
       (delete-file sidecar))))
 
@@ -707,20 +737,249 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
         (message "Renamed session %s to %s" session-id new-title)
         t))))
 
+(defun roster--claude-do-archive (session archived)
+  "Set a Claude Code SESSION archived state to ARCHIVED without prompting."
+  (let* ((session-id (plist-get session :id))
+         (encoded-dir (plist-get session :encoded-dir))
+         (sidecar (roster--claude-read-sidecar encoded-dir session-id))
+         (old-title (when sidecar (cdr (assoc "title" sidecar))))
+         (new-archived (when archived
+                         (floor (* 1000 (float-time (current-time)))))))
+    (roster--claude-write-sidecar encoded-dir session-id old-title new-archived)))
+
 (defun roster--claude-set-archived-command (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED; return non-nil on change."
   (let* ((session-id (plist-get session :id))
-         (encoded-dir (plist-get session :encoded-dir))
          (title (plist-get session :title))
          (verb (if archived "Archive" "Unarchive")))
     (when (yes-or-no-p (format "%s Claude session '%s' (%s)? " verb title session-id))
-      (let* ((sidecar (roster--claude-read-sidecar encoded-dir session-id))
-             (old-title (when sidecar (cdr (assoc "title" sidecar))))
-             (new-archived (when archived
-                             (floor (* 1000 (float-time (current-time)))))))
-        (roster--claude-write-sidecar encoded-dir session-id old-title new-archived)
-        (message "%sd session %s" verb session-id)
+      (roster--claude-do-archive session archived)
+      (message "%sd session %s" verb session-id)
+      t)))
+
+;;; Codex backend
+
+(defconst roster--codex-jsonl-read-limit 32768
+  "Maximum bytes read from a Codex JSONL file when parsing metadata.
+32 KB accommodates the large session_meta line (which includes skill
+instructions) and is enough to reach the first user message.")
+
+(defun roster--codex-sessions-dir ()
+  "Return the Codex active sessions directory."
+  (expand-file-name "sessions" roster-codex-dir))
+
+(defun roster--codex-archived-dir ()
+  "Return the Codex archived sessions directory."
+  (expand-file-name "archived_sessions" roster-codex-dir))
+
+(defun roster--codex-roster-dir ()
+  "Return the directory used to store Codex roster sidecar files."
+  (expand-file-name "roster" roster-codex-dir))
+
+(defun roster--codex-sidecar-path (session-id)
+  "Return the path to the roster sidecar JSON file for a Codex session."
+  (expand-file-name (concat session-id ".roster.json")
+                    (roster--codex-roster-dir)))
+
+(defun roster--codex-read-sidecar (session-id)
+  "Return roster metadata alist for a Codex session, or nil if no sidecar."
+  (let ((path (roster--codex-sidecar-path session-id)))
+    (when (file-readable-p path)
+      (condition-case nil
+          (let ((json-object-type 'alist)
+                (json-key-type 'string))
+            (json-read-file path))
+        (error nil)))))
+
+(defun roster--codex-write-sidecar (session-id title time-archived)
+  "Write roster sidecar JSON for a Codex session.
+TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
+  (let ((path (roster--codex-sidecar-path session-id))
+        (data (append (when title `(("title" . ,title)))
+                      (when time-archived `(("time_archived" . ,time-archived))))))
+    (make-directory (roster--codex-roster-dir) t)
+    (with-temp-file path
+      (insert (json-encode data)))))
+
+(defun roster--codex-date-path-from-filename (filename)
+  "Return YYYY/MM/DD path extracted from a Codex JSONL filename.
+Filename format: rollout-YYYY-MM-DDTHH-MM-SS-UUID.jsonl.
+Returns nil when the format is not recognized."
+  (when (string-match
+         "rollout-\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)T"
+         filename)
+    (format "%s/%s/%s"
+            (match-string 1 filename)
+            (match-string 2 filename)
+            (match-string 3 filename))))
+
+(defun roster--codex-jsonl-files ()
+  "Return a list of (PATH . ARCHIVED) for all Codex JSONL files."
+  (let (result)
+    (let ((sessions-dir (roster--codex-sessions-dir)))
+      (when (file-directory-p sessions-dir)
+        (dolist (year (directory-files sessions-dir nil "^[0-9]\\{4\\}$"))
+          (let ((year-dir (expand-file-name year sessions-dir)))
+            (dolist (month (directory-files year-dir nil "^[0-9]\\{2\\}$"))
+              (let ((month-dir (expand-file-name month year-dir)))
+                (dolist (day (directory-files month-dir nil "^[0-9]\\{2\\}$"))
+                  (let ((day-dir (expand-file-name day month-dir)))
+                    (dolist (fname (directory-files day-dir nil "\\.jsonl\\'"))
+                      (push (cons (expand-file-name fname day-dir) nil) result))))))))))
+    (let ((archived-dir (roster--codex-archived-dir)))
+      (when (file-directory-p archived-dir)
+        (dolist (fname (directory-files archived-dir nil "\\.jsonl\\'"))
+          (push (cons (expand-file-name fname archived-dir) t) result))))
+    (nreverse result)))
+
+(defun roster--codex-parse-jsonl (path)
+  "Return metadata plist from the head of a Codex JSONL file at PATH.
+Reads up to `roster--codex-jsonl-read-limit' bytes.
+Returns plist with keys :id, :cwd, :title-candidate, and :time-updated."
+  (condition-case nil
+      (let (session-id cwd title-candidate)
+        (with-temp-buffer
+          (insert-file-contents path nil 0 roster--codex-jsonl-read-limit)
+          (goto-char (point-min))
+          (while (and (not (eobp))
+                      (not (and session-id cwd title-candidate)))
+            (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
+                   (obj (roster--claude-read-json line)))
+              (when obj
+                (let ((type (plist-get obj :type))
+                      (payload (plist-get obj :payload)))
+                  (when (equal type "session_meta")
+                    (unless session-id
+                      (let ((v (plist-get payload :id)))
+                        (when (stringp v) (setq session-id v))))
+                    (unless cwd
+                      (let ((v (plist-get payload :cwd)))
+                        (when (and (stringp v) (not (string-empty-p v)))
+                          (setq cwd v)))))
+                  (when (equal type "event_msg")
+                    (when (and (not title-candidate)
+                               (equal (plist-get payload :type) "user_message"))
+                      (let ((msg (plist-get payload :message)))
+                        (when (and (stringp msg)
+                                   (not (string-empty-p (string-trim msg))))
+                          (setq title-candidate (string-trim msg)))))))))
+            (forward-line 1)))
+        (let* ((attrs (file-attributes path))
+               (mtime (when attrs (file-attribute-modification-time attrs)))
+               (time-updated (if mtime (floor (* 1000 (float-time mtime))) 0)))
+          (list :id session-id
+                :cwd (or cwd "")
+                :title-candidate title-candidate
+                :time-updated time-updated)))
+    (error nil)))
+
+(defun roster--codex-session-from-file (path archived)
+  "Return a unified Codex session plist for JSONL file at PATH.
+ARCHIVED is non-nil when PATH is from the archived_sessions directory."
+  (let* ((meta (roster--codex-parse-jsonl path))
+         (session-id (plist-get meta :id)))
+    (when (and meta session-id)
+      (let* ((sidecar (roster--codex-read-sidecar session-id))
+             (cwd (plist-get meta :cwd))
+             (sidecar-title (when sidecar (cdr (assoc "title" sidecar))))
+             (title
+              (or sidecar-title
+                  (when-let ((candidate (plist-get meta :title-candidate)))
+                    (if (> (length candidate) 60)
+                        (concat (substring candidate 0 57) "...")
+                      candidate))
+                  "(untitled)"))
+             (time-archived
+              (when archived
+                (or (when sidecar
+                      (let ((v (cdr (assoc "time_archived" sidecar))))
+                        (when (numberp v) v)))
+                    1))))
+        (list :id session-id
+              :title title
+              :directory (expand-file-name (if (string-empty-p cwd) "~" cwd))
+              :project-id nil
+              :time-updated (plist-get meta :time-updated)
+              :time-archived time-archived
+              :tool 'codex
+              :file-path path)))))
+
+(defun roster--codex-load-sessions ()
+  "Return Codex sessions as a list of unified session plists."
+  (when (file-directory-p roster-codex-dir)
+    (delq nil
+          (mapcar (lambda (entry)
+                    (roster--codex-session-from-file (car entry) (cdr entry)))
+                  (roster--codex-jsonl-files)))))
+
+(defun roster--codex-shell-snapshot-path (session-id)
+  "Return the path to the Codex shell snapshot file for SESSION-ID."
+  (expand-file-name (concat session-id ".sh")
+                    (expand-file-name "shell_snapshots" roster-codex-dir)))
+
+(defun roster--codex-delete-session (session)
+  "Delete a Codex SESSION's JSONL file, shell snapshot, and roster sidecar."
+  (let* ((session-id (plist-get session :id))
+         (file-path (plist-get session :file-path))
+         (snapshot (roster--codex-shell-snapshot-path session-id))
+         (sidecar (roster--codex-sidecar-path session-id)))
+    (when (file-exists-p file-path)
+      (move-file-to-trash file-path))
+    (when (file-exists-p snapshot)
+      (move-file-to-trash snapshot))
+    (when (file-exists-p sidecar)
+      (delete-file sidecar))))
+
+(defun roster--codex-rename-session-command (session)
+  "Rename a Codex SESSION via its roster sidecar; return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (old-title (roster--session-title session))
+         (new-title (roster--read-session-title session)))
+    (if (string= old-title new-title)
+        (progn (message "Session %s already uses that title" session-id) nil)
+      (let ((sidecar (roster--codex-read-sidecar session-id)))
+        (roster--codex-write-sidecar
+         session-id
+         new-title
+         (when sidecar (cdr (assoc "time_archived" sidecar))))
+        (message "Renamed session %s to %s" session-id new-title)
         t))))
+
+(defun roster--codex-do-archive (session archived)
+  "Set a Codex SESSION archived state to ARCHIVED without prompting."
+  (let* ((session-id (plist-get session :id))
+         (file-path (plist-get session :file-path)))
+    (if archived
+        (let ((dest (expand-file-name (file-name-nondirectory file-path)
+                                      (roster--codex-archived-dir))))
+          (make-directory (roster--codex-archived-dir) t)
+          (rename-file file-path dest)
+          (let* ((sidecar (roster--codex-read-sidecar session-id))
+                 (sidecar-title (when sidecar (cdr (assoc "title" sidecar)))))
+            (roster--codex-write-sidecar
+             session-id sidecar-title
+             (floor (* 1000 (float-time (current-time)))))))
+      (let* ((fname (file-name-nondirectory file-path))
+             (date-path (roster--codex-date-path-from-filename fname))
+             (dest-dir (if date-path
+                           (expand-file-name date-path (roster--codex-sessions-dir))
+                         (roster--codex-sessions-dir)))
+             (dest (expand-file-name fname dest-dir)))
+        (make-directory dest-dir t)
+        (rename-file file-path dest)
+        (let* ((sidecar (roster--codex-read-sidecar session-id))
+               (sidecar-title (when sidecar (cdr (assoc "title" sidecar)))))
+          (roster--codex-write-sidecar session-id sidecar-title nil))))))
+
+(defun roster--codex-set-archived-command (session archived)
+  "Set a Codex SESSION archived state to ARCHIVED; return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (title (plist-get session :title))
+         (verb (if archived "Archive" "Unarchive")))
+    (when (yes-or-no-p (format "%s Codex session '%s' (%s)? " verb title session-id))
+      (roster--codex-do-archive session archived)
+      (message "%sd Codex session %s" verb session-id)
+      t)))
 
 ;;; Tool helpers
 
@@ -728,12 +987,14 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
   "Return the short tool tag string for SESSION."
   (pcase (roster--session-tool session)
     ('claude "CC")
+    ('codex  "CX")
     (_        "OC")))
 
 (defun roster--tool-face (session)
   "Return a face spec for SESSION's tool tag using only the foreground color."
   (let ((base (pcase (roster--session-tool session)
                 ('claude 'roster-list-tool-claude-face)
+                ('codex  'roster-list-tool-codex-face)
                 (_        'roster-list-tool-opencode-face))))
     `(:foreground ,(face-foreground base nil 'default))))
 
@@ -744,6 +1005,10 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
      (format "%s -r %s"
              roster-claude-command
              (shell-quote-argument (roster--session-id session))))
+    ('codex
+     (format "%s resume %s"
+             roster-codex-command
+             (shell-quote-argument (roster--session-id session))))
     (_
      (format "%s -s %s"
              roster-opencode-command
@@ -753,6 +1018,7 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
   "Return the command used to create a new TOOL session."
   (pcase tool
     ('claude roster-claude-command)
+    ('codex  roster-codex-command)
     (_ roster-opencode-command)))
 
 (defun roster--select-tool-for-new-session ()
@@ -868,7 +1134,9 @@ When JUMP is non-nil, open the session directory in Dired first."
   (let ((directory (plist-get session :directory)))
     (list (plist-get session :id)
           (vector
-           (concat "  " (propertize (roster--session-title session) 'face 'roster-list-title-face))
+           (concat "  " (propertize (replace-regexp-in-string "[[:cntrl:]]" " "
+                                                               (roster--session-title session))
+                                    'face 'roster-list-title-face))
            (propertize (roster--tool-label session) 'face (roster--tool-face session))
            (propertize (upcase (roster--session-state session)) 'face (roster--state-face session))
            (propertize (file-name-nondirectory (directory-file-name directory))
@@ -893,7 +1161,8 @@ When JUMP is non-nil, open the session directory in Dired first."
 (defun roster-list-refresh ()
   "Refresh the current `roster' list buffer."
   (interactive)
-  (revert-buffer))
+  (revert-buffer)
+  (roster-list--apply-marks))
 
 (defun roster-list-toggle-archived ()
   "Toggle whether archived sessions are shown in the current list."
@@ -950,6 +1219,188 @@ With a prefix argument, open the session directory in Dired first."
   (interactive)
   (roster--start-new-session-with-directory-prompt))
 
+;;; Mark and bulk operations
+
+(defun roster-list--marked-ids ()
+  "Return the list of marked session IDs in the current buffer."
+  (let (ids)
+    (maphash (lambda (id _) (push id ids)) roster-list--marked)
+    (nreverse ids)))
+
+(defun roster-list--clear-marks ()
+  "Remove all marks and their overlays in the current buffer."
+  (maphash (lambda (_id ov)
+             (when (overlayp ov) (delete-overlay ov)))
+           roster-list--mark-overlays)
+  (clrhash roster-list--marked)
+  (clrhash roster-list--mark-overlays))
+
+(defun roster-list--add-mark-overlay (session-id)
+  "Highlight the current line as marked for SESSION-ID."
+  (when-let ((existing (gethash session-id roster-list--mark-overlays)))
+    (when (overlayp existing) (delete-overlay existing)))
+  (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
+    (overlay-put ov 'face 'roster-list-mark-face)
+    (puthash session-id ov roster-list--mark-overlays)))
+
+(defun roster-list--apply-marks ()
+  "Reapply mark overlays after a buffer refresh."
+  (maphash (lambda (_id ov)
+             (when (overlayp ov) (delete-overlay ov)))
+           roster-list--mark-overlays)
+  (clrhash roster-list--mark-overlays)
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let ((id (tabulated-list-get-id)))
+        (when (and id (gethash id roster-list--marked))
+          (roster-list--add-mark-overlay id)))
+      (forward-line 1))))
+
+(defun roster-list--nearest-surviving-session (deleted-ids)
+  "Return the ID of the session nearest to point not in DELETED-IDS.
+Prefers a following line when two candidates are equidistant."
+  (let* ((origin (line-number-at-pos))
+         (best-id nil)
+         (best-dist nil)
+         (best-fwd nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let ((id (tabulated-list-get-id)))
+          (when (and id (not (member id deleted-ids)))
+            (let* ((ln (line-number-at-pos))
+                   (d (abs (- ln origin)))
+                   (fwd (>= ln origin)))
+              (when (or (null best-dist)
+                        (< d best-dist)
+                        (and (= d best-dist) fwd (not best-fwd)))
+                (setq best-id id best-dist d best-fwd fwd)))))
+        (forward-line 1)))
+    best-id))
+
+(defun roster-list--line-of-session (session-id)
+  "Return the line number of SESSION-ID in the current buffer, or nil."
+  (when session-id
+    (save-excursion
+      (goto-char (point-min))
+      (let (line)
+        (while (and (not line) (< (point) (point-max)))
+          (when (equal (tabulated-list-get-id) session-id)
+            (setq line (line-number-at-pos)))
+          (forward-line 1))
+        line))))
+
+(defun roster-list-mark ()
+  "Toggle mark on the session at point and advance to the next line.
+With an active region, mark all sessions in the region (no toggle)."
+  (interactive)
+  (if (use-region-p)
+      (let* ((beg (region-beginning))
+             (end (region-end))
+             (finish (if (and (> end beg)
+                              (save-excursion (goto-char end) (bolp)))
+                         (1- end)
+                       end)))
+        (save-excursion
+          (goto-char beg)
+          (beginning-of-line)
+          (while (<= (line-beginning-position) finish)
+            (when-let ((id (tabulated-list-get-id)))
+              (puthash id t roster-list--marked)
+              (roster-list--add-mark-overlay id))
+            (forward-line 1)))
+        (deactivate-mark)
+        (goto-char (max beg end))
+        (beginning-of-line)
+        (forward-line 1))
+    (let ((id (tabulated-list-get-id)))
+      (unless id (user-error "No session on this line"))
+      (if (gethash id roster-list--marked)
+          (progn
+            (remhash id roster-list--marked)
+            (when-let ((ov (gethash id roster-list--mark-overlays)))
+              (delete-overlay ov)
+              (remhash id roster-list--mark-overlays)))
+        (puthash id t roster-list--marked)
+        (roster-list--add-mark-overlay id))
+      (forward-line 1))))
+
+(defun roster-list-unmark ()
+  "Unmark the session at point and advance to the next line."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (unless id (user-error "No session on this line"))
+    (remhash id roster-list--marked)
+    (when-let ((ov (gethash id roster-list--mark-overlays)))
+      (delete-overlay ov)
+      (remhash id roster-list--mark-overlays))
+    (forward-line 1)))
+
+(defun roster-list-unmark-all ()
+  "Clear all marks in the current roster list buffer."
+  (interactive)
+  (roster-list--clear-marks)
+  (message "Cleared all marks"))
+
+(defun roster-list-delete-marked ()
+  "Delete all marked sessions after confirmation.
+If no sessions are marked, delete the session at point (same as `d')."
+  (interactive)
+  (let ((ids (roster-list--marked-ids)))
+    (if (null ids)
+        (roster-list-delete)
+    (when (yes-or-no-p (format "Delete %d marked sessions? " (length ids)))
+      (let* ((win-line (count-screen-lines (window-start) (point)))
+             (target-id (roster-list--nearest-surviving-session ids))
+             (all-sessions (roster--load-sessions)))
+        (dolist (id ids)
+          (when-let ((session (seq-find (lambda (s) (string= (plist-get s :id) id))
+                                        all-sessions)))
+            (roster--do-delete-session session)))
+        (roster-list--clear-marks)
+        (revert-buffer)
+        (roster-list--apply-marks)
+        (when-let ((ln (roster-list--line-of-session target-id)))
+          (goto-char (point-min))
+          (forward-line (1- ln))
+          (recenter win-line))
+        (message "Deleted %d sessions" (length ids)))))))
+
+(defun roster-list-archive-marked ()
+  "Toggle archive state of all marked sessions after confirmation.
+If no sessions are marked, toggle archive state of the session at point
+\(same as `a')."
+  (interactive)
+  (let ((ids (roster-list--marked-ids)))
+    (if (null ids)
+        (roster-list-toggle-archive)
+    (let* ((all-sessions (roster--load-sessions))
+           (sessions (delq nil
+                           (mapcar (lambda (id)
+                                     (seq-find (lambda (s) (string= (plist-get s :id) id))
+                                               all-sessions))
+                                   ids)))
+           (n-archive   (seq-count (lambda (s) (not (roster--session-archived-p s))) sessions))
+           (n-unarchive (seq-count #'roster--session-archived-p sessions))
+           (verb (cond ((zerop n-unarchive) "Archive")
+                       ((zerop n-archive)   "Unarchive")
+                       (t "Archive/Unarchive"))))
+      (when (yes-or-no-p (format "%s %d marked sessions? " verb (length sessions)))
+        (let* ((win-line (count-screen-lines (window-start) (point)))
+               (target-id (roster-list--nearest-surviving-session ids)))
+          (dolist (session sessions)
+            (roster--do-archive-session session
+                                        (not (roster--session-archived-p session))))
+          (roster-list--clear-marks)
+          (revert-buffer)
+          (roster-list--apply-marks)
+          (when-let ((ln (roster-list--line-of-session target-id)))
+            (goto-char (point-min))
+            (forward-line (1- ln))
+            (recenter win-line))
+          (message "%sd %d sessions" verb (length sessions))))))))
+
 (defvar roster-list-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
@@ -963,6 +1414,11 @@ With a prefix argument, open the session directory in Dired first."
     (define-key map (kbd "c") #'roster-list-new-session)
     (define-key map (kbd "g") #'roster-list-refresh)
     (define-key map (kbd "t") #'roster-list-toggle-archived)
+    (define-key map (kbd "m") #'roster-list-mark)
+    (define-key map (kbd "u") #'roster-list-unmark)
+    (define-key map (kbd "U") #'roster-list-unmark-all)
+    (define-key map (kbd "D") #'roster-list-delete-marked)
+    (define-key map (kbd "A") #'roster-list-archive-marked)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `roster-list-mode'.")
@@ -992,7 +1448,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
                                                roster-list-include-archived
                                              include-archived))
       (setq-local header-line-format
-                  "RET/e resume, d delete, r rename, a archive, R move, o dired, c create, t archived, g refresh")
+                  "RET/e resume, d delete, r rename, a archive, R move, o dired, c create, t archived, g refresh | m mark, u unmark, U unmark-all, D delete-marked, A archive-marked")
       (tabulated-list-revert))
     (pop-to-buffer buffer)))
 
@@ -1018,7 +1474,19 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
   "Rename SESSION and return non-nil when the title changes."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-rename-session-command session))
+    ('codex  (roster--codex-rename-session-command session))
     (_       (roster--opencode-rename-session-command session))))
+
+(defun roster--opencode-do-archive (session archived)
+  "Set an OpenCode SESSION archived state to ARCHIVED without prompting."
+  (let* ((session-id (roster--session-id session))
+         (verb (if archived "Archive" "Unarchive")))
+    (unless (roster--set-session-archived session-id archived)
+      (user-error "No session updated for id %s" session-id))
+    (let ((updated (roster--session-with-project-worktree session-id)))
+      (unless (and updated (eq (roster--session-archived-p updated) archived))
+        (user-error "Session %s failed %s verification" session-id (downcase verb)))
+      t)))
 
 (defun roster--opencode-set-archived-command (session archived)
   "Set an OpenCode SESSION archived state to ARCHIVED; return non-nil on change."
@@ -1026,20 +1494,30 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
          (title (roster--session-title session))
          (verb (if archived "Archive" "Unarchive")))
     (when (yes-or-no-p (format "%s OpenCode session '%s' (%s)? " verb title session-id))
-      (unless (roster--set-session-archived session-id archived)
-        (user-error "No session updated for id %s" session-id))
-      (let ((updated (roster--session-with-project-worktree session-id)))
-        (unless (and updated
-                     (eq (roster--session-archived-p updated) archived))
-          (user-error "Session %s failed %s verification" session-id (downcase verb)))
-        (message "%sd session %s" verb session-id)
-        t))))
+      (roster--opencode-do-archive session archived)
+      (message "%sd session %s" verb session-id)
+      t)))
 
 (defun roster--set-session-archived-command (session archived)
   "Set SESSION archived state to ARCHIVED and return non-nil on change."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-set-archived-command session archived))
+    ('codex  (roster--codex-set-archived-command session archived))
     (_       (roster--opencode-set-archived-command session archived))))
+
+(defun roster--do-delete-session (session)
+  "Delete SESSION without prompting."
+  (pcase (plist-get session :tool)
+    ('claude (roster--claude-delete-session session))
+    ('codex  (roster--codex-delete-session session))
+    (_       (roster--opencode-delete-session session))))
+
+(defun roster--do-archive-session (session archived)
+  "Archive or unarchive SESSION without prompting."
+  (pcase (plist-get session :tool)
+    ('claude (roster--claude-do-archive session archived))
+    ('codex  (roster--codex-do-archive session archived))
+    (_       (roster--opencode-do-archive session archived))))
 
 (defun roster--delete-session-command (session)
   "Delete SESSION and return non-nil on success."
@@ -1047,9 +1525,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
         (title (roster--session-title session))
         (directory (roster--session-directory session)))
     (when (yes-or-no-p (format "Delete session '%s' (%s)? " title session-id))
-      (pcase (plist-get session :tool)
-        ('claude (roster--claude-delete-session session))
-        (_       (roster--opencode-delete-session session)))
+      (roster--do-delete-session session)
       (message "Deleted session %s from %s" session-id directory)
       t)))
 
@@ -1079,9 +1555,12 @@ PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
 
 (defun roster--update-session-directory-command (session)
   "Move SESSION to another known OpenCode project directory.
-Signals a `user-error' for Claude Code sessions, which are not movable."
-  (when (eq (plist-get session :tool) 'claude)
-    (user-error "Directory moves are not supported for Claude Code sessions"))
+Signals a `user-error' for Claude Code and Codex sessions, which are not movable."
+  (when (memq (plist-get session :tool) '(claude codex))
+    (user-error "Directory moves are not supported for %s sessions"
+                (pcase (plist-get session :tool)
+                  ('claude "Claude Code")
+                  ('codex  "Codex"))))
   (let* ((session-id (plist-get session :id))
          (old-dir (plist-get session :directory))
          (old-project-id (plist-get session :project-id))
