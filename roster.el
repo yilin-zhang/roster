@@ -171,11 +171,6 @@ Must be a symbol present in `roster-enabled-tools'."
 (defvar-local roster-list--mark-overlays (make-hash-table :test #'equal)
   "Hash table mapping session ID to its mark overlay in the current buffer.")
 
-(defconst roster--claude-jsonl-read-limit 8192
-  "Maximum bytes read from a Claude Code JSONL file when parsing metadata.
-8 KB is enough to capture the system entry (slug) and the first user message
-\(title candidate) without loading arbitrarily large conversation files.")
-
 ;;; Constants
 
 (defconst roster--ms-per-second 1000
@@ -212,18 +207,12 @@ Must be a symbol present in `roster-enabled-tools'."
           (> (or (plist-get a :time-updated) 0)
              (or (plist-get b :time-updated) 0)))))
 
-(defun roster--readable-session-list (sessions missing-message)
-  "Return SESSIONS or signal MISSING-MESSAGE when empty."
-  (unless sessions
-    (user-error "%s" missing-message))
-  sessions)
-
 (defun roster--select-from-sessions (sessions prompt missing-message)
   "Select one entry from SESSIONS using PROMPT.
 Signal MISSING-MESSAGE when SESSIONS is empty."
-  (roster--select-session
-   (roster--readable-session-list sessions missing-message)
-   prompt))
+  (unless sessions
+    (user-error "%s" missing-message))
+  (roster--select-session sessions prompt))
 
 (defun roster--session-archived-p (session)
   "Return non-nil when SESSION is archived."
@@ -585,15 +574,11 @@ used later as the key for sidecar files."
   "Return the Claude Code projects directory."
   (expand-file-name "projects" roster-claude-dir))
 
-(defun roster--claude-jsonl-path (encoded-dir session-id)
-  "Return the path to the Claude Code JSONL file for ENCODED-DIR and SESSION-ID."
-  (expand-file-name (concat session-id ".jsonl")
-                    (expand-file-name encoded-dir (roster--claude-projects-dir))))
-
 (defun roster--claude-append-custom-title (encoded-dir session-id title)
   "Append a custom-title record to the Claude Code JSONL for SESSION-ID.
 This is equivalent to what Claude Code's /rename command does internally."
-  (let ((path (roster--claude-jsonl-path encoded-dir session-id))
+  (let ((path (expand-file-name (concat session-id ".jsonl")
+                                (expand-file-name encoded-dir (roster--claude-projects-dir))))
         (record (json-encode `(("type" . "custom-title")
                                ("customTitle" . ,title)
                                ("sessionId" . ,session-id)))))
@@ -733,7 +718,7 @@ and :time-updated (file mtime in milliseconds)."
   (condition-case nil
       (let (slug cwd title-candidate)
         (with-temp-buffer
-          (insert-file-contents path nil 0 roster--claude-jsonl-read-limit)
+          (insert-file-contents path)
           (goto-char (point-min))
           (while (and (not (eobp))
                       (not (and slug cwd title-candidate)))
@@ -1013,7 +998,7 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
   (pcase (roster--session-tool session)
     ('claude "CC")
     ('codex  "CX")
-    (_        "OC")))
+    (_       "OC")))
 
 (defun roster--tool-face (session)
   "Return a face spec for SESSION's tool tag using only the foreground color."
