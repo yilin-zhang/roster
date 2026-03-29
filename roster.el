@@ -635,9 +635,13 @@ so the caller can pattern-match the result and rebind all three at once."
           (when (and (stringp value) (not (string-empty-p value)))
             (setq new-cwd value))))
       (unless new-title
-        (setq new-title
-              (roster--claude-content-text
-               (plist-get (plist-get obj :message) :content)))))
+        (let ((text (roster--claude-content-text
+                     (plist-get (plist-get obj :message) :content))))
+          ;; Skip system-injected turns such as /compact output, which Claude
+          ;; Code stores as user messages beginning with an XML-like tag (e.g.
+          ;; "<local-command-caveat>...").  Those are not real session starters.
+          (unless (and text (string-prefix-p "<" text))
+            (setq new-title text)))))
     (list :slug new-slug
           :cwd new-cwd
           :title-candidate new-title)))
