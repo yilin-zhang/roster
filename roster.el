@@ -303,6 +303,24 @@ Loads from OpenCode, Claude Code, and/or Codex per `roster-enabled-tools'."
                  nil)))
       roster-enabled-tools))))
 
+(defun roster--read-sidecar (path)
+  "Return roster metadata alist from sidecar file at PATH, or nil."
+  (when (file-readable-p path)
+    (condition-case nil
+        (let ((json-object-type 'alist)
+              (json-key-type 'string))
+          (json-read-file path))
+      (error nil))))
+
+(defun roster--write-sidecar (path title time-archived)
+  "Write roster sidecar JSON to PATH.
+TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
+  (let ((data (append (when title `(("title" . ,title)))
+                      (when time-archived `(("time_archived" . ,time-archived))))))
+    (make-directory (file-name-directory path) t)
+    (with-temp-file path
+      (insert (json-encode data)))))
+
 ;;; Terminal functions
 
 (defun roster-open-in-ghostty (directory command)
@@ -594,23 +612,11 @@ This is equivalent to what Claude Code's /rename command does internally."
 
 (defun roster--claude-read-sidecar (session-id)
   "Return roster metadata alist for SESSION-ID, or nil if no sidecar."
-  (let ((path (roster--claude-sidecar-path session-id)))
-    (when (file-readable-p path)
-      (condition-case nil
-          (let ((json-object-type 'alist)
-                (json-key-type 'string))
-            (json-read-file path))
-        (error nil)))))
+  (roster--read-sidecar (roster--claude-sidecar-path session-id)))
 
 (defun roster--claude-write-sidecar (session-id title time-archived)
-  "Write roster sidecar JSON for a Claude Code session.
-TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
-  (let ((path (roster--claude-sidecar-path session-id))
-        (data (append (when title `(("title" . ,title)))
-                      (when time-archived `(("time_archived" . ,time-archived))))))
-    (make-directory (roster--claude-roster-dir) t)
-    (with-temp-file path
-      (insert (json-encode data)))))
+  "Write roster sidecar JSON for a Claude Code session."
+  (roster--write-sidecar (roster--claude-sidecar-path session-id) title time-archived))
 
 (defun roster--claude-read-json (string)
   "Parse JSON STRING as a plist, or return nil on failure."
@@ -826,23 +832,11 @@ This is equivalent to /rename inside Claude Code; return non-nil on change."
 
 (defun roster--codex-read-sidecar (session-id)
   "Return roster metadata alist for a Codex session, or nil if no sidecar."
-  (let ((path (roster--codex-sidecar-path session-id)))
-    (when (file-readable-p path)
-      (condition-case nil
-          (let ((json-object-type 'alist)
-                (json-key-type 'string))
-            (json-read-file path))
-        (error nil)))))
+  (roster--read-sidecar (roster--codex-sidecar-path session-id)))
 
 (defun roster--codex-write-sidecar (session-id title time-archived)
-  "Write roster sidecar JSON for a Codex session.
-TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
-  (let ((path (roster--codex-sidecar-path session-id))
-        (data (append (when title `(("title" . ,title)))
-                      (when time-archived `(("time_archived" . ,time-archived))))))
-    (make-directory (roster--codex-roster-dir) t)
-    (with-temp-file path
-      (insert (json-encode data)))))
+  "Write roster sidecar JSON for a Codex session."
+  (roster--write-sidecar (roster--codex-sidecar-path session-id) title time-archived))
 
 (defun roster--codex-date-path-from-filename (filename)
   "Return YYYY/MM/DD path extracted from a Codex JSONL filename.
