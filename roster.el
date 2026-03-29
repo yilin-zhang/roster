@@ -184,6 +184,9 @@ Must be a symbol present in `roster-enabled-tools'."
 (defconst roster--title-max-length 60
   "Maximum character length for auto-derived session titles before truncation.")
 
+(defconst roster--untitled "(untitled)"
+  "Fallback display title for sessions with no identifiable title.")
+
 ;;; Core
 
 (defun roster--session-tool (session)
@@ -422,7 +425,7 @@ Return non-nil when exactly one row was affected."
   "Return OpenCode session plist parsed from SQLite ROW (a list of strings)."
   (pcase-let ((`(,id ,title ,directory ,project-id ,time-updated ,archived-raw) row))
     (list :id id
-          :title (if (string-empty-p title) "(untitled)" title)
+          :title (if (string-empty-p title) roster--untitled title)
           :directory (expand-file-name directory)
           :project-id project-id
           :time-updated (string-to-number (or time-updated "0"))
@@ -500,7 +503,7 @@ worktree contains DIRECTORY, and finally the global project."
                          "WHERE s.id = " (roster--opencode-sql-quote session-id) " LIMIT 1;")))))
     (pcase-let ((`(,id ,title ,directory ,project-id ,project-worktree ,archived-raw) row))
       (list :id id
-            :title (if (string-empty-p title) "(untitled)" title)
+            :title (if (string-empty-p title) roster--untitled title)
             :directory (expand-file-name directory)
             :project-id project-id
             :time-archived (unless (string-empty-p archived-raw)
@@ -563,6 +566,22 @@ used later as the key for sidecar files."
 (defun roster--claude-projects-dir ()
   "Return the Claude Code projects directory."
   (expand-file-name "projects" roster-claude-dir))
+
+(defun roster--claude-jsonl-path (encoded-dir session-id)
+  "Return the path to the Claude Code JSONL file for ENCODED-DIR and SESSION-ID."
+  (expand-file-name (concat session-id ".jsonl")
+                    (expand-file-name encoded-dir (roster--claude-projects-dir))))
+
+(defun roster--claude-append-custom-title (encoded-dir session-id title)
+  "Append a custom-title record to the Claude Code JSONL for SESSION-ID.
+This is equivalent to what Claude Code's /rename command does internally."
+  (let ((path (roster--claude-jsonl-path encoded-dir session-id))
+        (record (json-encode `(("type" . "custom-title")
+                               ("customTitle" . ,title)
+                               ("sessionId" . ,session-id)))))
+    (unless (file-exists-p path)
+      (error "JSONL file not found: %s" path))
+    (write-region (concat record "\n") nil path t 'silent)))
 
 (defun roster--claude-sidecar-path (encoded-dir session-id)
   "Return the path to the roster sidecar JSON file for ENCODED-DIR and SESSION-ID."
@@ -646,18 +665,37 @@ so the caller can pattern-match the result and rebind all three at once."
           :cwd new-cwd
           :title-candidate new-title)))
 
+(defun roster--claude-custom-title (path)
+  "Return the most recent /rename title from the Claude JSONL at PATH, or nil."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents path)
+        (goto-char (point-max))
+        (when (re-search-backward "\"custom-title\"" nil t)
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (when-let* ((obj (roster--claude-read-json line))
+                        ((equal (plist-get obj :type) "custom-title"))
+                        (title (plist-get obj :customTitle))
+                        ((stringp title))
+                        ((not (string-empty-p title))))
+              title))))
+    (error nil)))
+
 (defun roster--claude-title (meta sidecar)
   "Return display title derived from META and SIDECAR."
   (let ((slug (plist-get meta :slug))
         (candidate (plist-get meta :title-candidate))
+        (custom-title (plist-get meta :custom-title))
         (sidecar-title (cdr (assoc "title" sidecar))))
     (or sidecar-title
+        custom-title
         slug
         (when candidate
           (if (> (length candidate) roster--title-max-length)
               (concat (substring candidate 0 (- roster--title-max-length 3)) "...")
             candidate))
-        "(untitled)")))
+        roster--untitled)))
 
 (defun roster--claude-session-from-file (encoded-dir path)
   "Return unified Claude session plist for ENCODED-DIR and JSONL file at PATH."
@@ -678,9 +716,9 @@ so the caller can pattern-match the result and rebind all three at once."
               :encoded-dir encoded-dir)))))
 
 (defun roster--claude-parse-jsonl (path)
-  "Return metadata plist from the head of a Claude Code JSONL file at PATH.
-Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
-:title-candidate, and :time-updated (file mtime in milliseconds)."
+  "Return metadata plist from a Claude Code JSONL file at PATH.
+Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
+and :time-updated (file mtime in milliseconds)."
   (condition-case nil
       (let (slug cwd title-candidate)
         (with-temp-buffer
@@ -705,6 +743,7 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
           (list :slug slug
                 :cwd (or cwd "")
                 :title-candidate title-candidate
+                :custom-title (roster--claude-custom-title path)
                 :time-updated time-updated)))
     (error nil)))
 
@@ -730,30 +769,25 @@ Reads up to 8 KB.  Returns plist with keys :slug, :cwd,
       (delete-file sidecar))))
 
 (defun roster--claude-rename-session-command (session)
-  "Rename a Claude Code SESSION via its roster sidecar; return non-nil on change."
+  "Rename a Claude Code SESSION by appending a custom-title record to its JSONL.
+This is equivalent to /rename inside Claude Code; return non-nil on change."
   (let* ((session-id (plist-get session :id))
          (encoded-dir (plist-get session :encoded-dir))
          (old-title (roster--session-title session))
          (new-title (roster--read-session-title session)))
     (if (string= old-title new-title)
         (progn (message "Session %s already uses that title" session-id) nil)
-      (let ((sidecar (roster--claude-read-sidecar encoded-dir session-id)))
-        (roster--claude-write-sidecar
-         encoded-dir session-id
-         new-title
-         (when sidecar (cdr (assoc "time_archived" sidecar))))
-        (message "Renamed session %s to %s" session-id new-title)
-        t))))
+      (roster--claude-append-custom-title encoded-dir session-id new-title)
+      (message "Renamed session %s to %s" session-id new-title)
+      t)))
 
 (defun roster--claude-do-archive (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED without prompting."
   (let* ((session-id (plist-get session :id))
          (encoded-dir (plist-get session :encoded-dir))
-         (sidecar (roster--claude-read-sidecar encoded-dir session-id))
-         (old-title (when sidecar (cdr (assoc "title" sidecar))))
          (new-archived (when archived
                          (floor (* roster--ms-per-second (float-time (current-time)))))))
-    (roster--claude-write-sidecar encoded-dir session-id old-title new-archived)))
+    (roster--claude-write-sidecar encoded-dir session-id nil new-archived)))
 
 (defun roster--claude-set-archived-command (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED; return non-nil on change."
@@ -889,7 +923,7 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
                     candidate))
                 (let ((base (file-name-nondirectory (directory-file-name dir))))
                   (unless (string-empty-p base) base))
-                "(untitled)"))
+                roster--untitled))
            (time-archived
             (when archived
               (let ((v (when sidecar (cdr (assoc "time_archived" sidecar)))))
