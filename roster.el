@@ -583,14 +583,18 @@ This is equivalent to what Claude Code's /rename command does internally."
       (error "JSONL file not found: %s" path))
     (write-region (concat record "\n") nil path t 'silent)))
 
-(defun roster--claude-sidecar-path (encoded-dir session-id)
-  "Return the path to the roster sidecar JSON file for ENCODED-DIR and SESSION-ID."
-  (expand-file-name (concat session-id ".roster.json")
-                    (expand-file-name encoded-dir (roster--claude-projects-dir))))
+(defun roster--claude-roster-dir ()
+  "Return the directory used to store Claude Code roster sidecar files."
+  (expand-file-name "roster" roster-claude-dir))
 
-(defun roster--claude-read-sidecar (encoded-dir session-id)
-  "Return roster metadata alist for ENCODED-DIR and SESSION-ID, or nil if no sidecar."
-  (let ((path (roster--claude-sidecar-path encoded-dir session-id)))
+(defun roster--claude-sidecar-path (session-id)
+  "Return the path to the roster sidecar JSON file for SESSION-ID."
+  (expand-file-name (concat session-id ".roster.json")
+                    (roster--claude-roster-dir)))
+
+(defun roster--claude-read-sidecar (session-id)
+  "Return roster metadata alist for SESSION-ID, or nil if no sidecar."
+  (let ((path (roster--claude-sidecar-path session-id)))
     (when (file-readable-p path)
       (condition-case nil
           (let ((json-object-type 'alist)
@@ -598,12 +602,13 @@ This is equivalent to what Claude Code's /rename command does internally."
             (json-read-file path))
         (error nil)))))
 
-(defun roster--claude-write-sidecar (encoded-dir session-id title time-archived)
+(defun roster--claude-write-sidecar (session-id title time-archived)
   "Write roster sidecar JSON for a Claude Code session.
 TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
-  (let ((path (roster--claude-sidecar-path encoded-dir session-id))
+  (let ((path (roster--claude-sidecar-path session-id))
         (data (append (when title `(("title" . ,title)))
                       (when time-archived `(("time_archived" . ,time-archived))))))
+    (make-directory (roster--claude-roster-dir) t)
     (with-temp-file path
       (insert (json-encode data)))))
 
@@ -702,7 +707,7 @@ so the caller can pattern-match the result and rebind all three at once."
   (let* ((session-id (file-name-sans-extension (file-name-nondirectory path)))
          (meta (roster--claude-parse-jsonl path)))
     (when meta
-      (let* ((sidecar (roster--claude-read-sidecar encoded-dir session-id))
+      (let* ((sidecar (roster--claude-read-sidecar session-id))
              (cwd (plist-get meta :cwd))
              (time-archived (let ((value (cdr (assoc "time_archived" sidecar))))
                               (when (numberp value) value))))
@@ -762,7 +767,7 @@ and :time-updated (file mtime in milliseconds)."
          (encoded-dir (plist-get session :encoded-dir))
          (dir (expand-file-name encoded-dir (roster--claude-projects-dir)))
          (jsonl (expand-file-name (concat session-id ".jsonl") dir))
-         (sidecar (roster--claude-sidecar-path encoded-dir session-id)))
+         (sidecar (roster--claude-sidecar-path session-id)))
     (when (file-exists-p jsonl)
       (move-file-to-trash jsonl))
     (when (file-exists-p sidecar)
@@ -787,7 +792,7 @@ This is equivalent to /rename inside Claude Code; return non-nil on change."
          (encoded-dir (plist-get session :encoded-dir))
          (new-archived (when archived
                          (floor (* roster--ms-per-second (float-time (current-time)))))))
-    (roster--claude-write-sidecar encoded-dir session-id nil new-archived)))
+    (roster--claude-write-sidecar session-id nil new-archived)))
 
 (defun roster--claude-set-archived-command (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED; return non-nil on change."
