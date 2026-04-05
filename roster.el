@@ -73,17 +73,17 @@
   :group 'roster)
 
 (defface roster-list-tool-opencode-face
-  '((t :inherit ansi-color-blue))
+  `((t :foreground ,(face-attribute 'ansi-color-blue :foreground)))
   "Face for the OpenCode tool tag in `roster' lists."
   :group 'roster)
 
 (defface roster-list-tool-claude-face
-  '((t :inherit ansi-color-yellow))
+  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
   "Face for the Claude Code tool tag in `roster' lists."
   :group 'roster)
 
 (defface roster-list-tool-codex-face
-  '((t :inherit ansi-color-green))
+  `((t :foreground ,(face-attribute 'ansi-color-green :foreground)))
   "Face for the Codex tool tag in `roster' lists."
   :group 'roster)
 
@@ -91,6 +91,11 @@
   '((((background dark)) (:background "DarkGoldenrod4"))
     (t (:background "LightYellow1")))
   "Face for marked rows in `roster' lists."
+  :group 'roster)
+
+(defface roster-list-mark-indicator-face
+  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
+  "Face for the mark indicator character in `roster' lists."
   :group 'roster)
 
 ;;; Customization
@@ -1001,12 +1006,11 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
     (_       "OC")))
 
 (defun roster--tool-face (session)
-  "Return a face spec for SESSION's tool tag using only the foreground color."
-  (let ((base (pcase (roster--session-tool session)
-                ('claude 'roster-list-tool-claude-face)
-                ('codex  'roster-list-tool-codex-face)
-                (_        'roster-list-tool-opencode-face))))
-    `(:foreground ,(face-foreground base nil 'default))))
+  "Return the face for SESSION's tool tag."
+  (pcase (roster--session-tool session)
+    ('claude 'roster-list-tool-claude-face)
+    ('codex  'roster-list-tool-codex-face)
+    (_       'roster-list-tool-opencode-face)))
 
 (defun roster--session-command (session)
   "Return the shell command used to resume SESSION."
@@ -1148,9 +1152,9 @@ When JUMP is non-nil, open the session directory in Dired first."
   (let ((directory (plist-get session :directory)))
     (list (plist-get session :id)
           (vector
-           (concat "  " (propertize (replace-regexp-in-string "[[:cntrl:]]" " "
-                                                              (roster--session-title session))
-                                    'face 'roster-list-title-face))
+           (propertize (replace-regexp-in-string "[[:cntrl:]]" " "
+                                               (roster--session-title session))
+                       'face 'roster-list-title-face)
            (propertize (roster--tool-label session) 'face (roster--tool-face session))
            (propertize (upcase (roster--session-state session)) 'face (roster--state-face session))
            (propertize (file-name-nondirectory (directory-file-name directory))
@@ -1241,10 +1245,14 @@ With a prefix argument, open the session directory in Dired first."
     (maphash (lambda (id _) (push id ids)) roster-list--marked)
     (nreverse ids)))
 
+(defun roster-list--delete-mark-overlays (ovs)
+  "Delete overlay pair OVS (a cons of two overlays)."
+  (when (overlayp (car ovs)) (delete-overlay (car ovs)))
+  (when (overlayp (cdr ovs)) (delete-overlay (cdr ovs))))
+
 (defun roster-list--clear-marks ()
   "Remove all marks and their overlays in the current buffer."
-  (maphash (lambda (_id ov)
-             (when (overlayp ov) (delete-overlay ov)))
+  (maphash (lambda (_id ovs) (roster-list--delete-mark-overlays ovs))
            roster-list--mark-overlays)
   (clrhash roster-list--marked)
   (clrhash roster-list--mark-overlays))
@@ -1252,18 +1260,20 @@ With a prefix argument, open the session directory in Dired first."
 (defun roster-list--add-mark-overlay (session-id)
   "Highlight the current line as marked for SESSION-ID."
   (when-let ((existing (gethash session-id roster-list--mark-overlays)))
-    (when (overlayp existing) (delete-overlay existing)))
-  (let ((ov (make-overlay (line-beginning-position) (line-end-position))))
+    (roster-list--delete-mark-overlays existing))
+  (let ((ov (make-overlay (line-beginning-position) (line-end-position)))
+        (mark-ov (make-overlay (line-beginning-position)
+                               (1+ (line-beginning-position)))))
     (overlay-put ov 'face 'roster-list-mark-face)
-    (puthash session-id ov roster-list--mark-overlays)))
+    (overlay-put mark-ov 'display (propertize "*" 'face 'roster-list-mark-indicator-face))
+    (puthash session-id (cons ov mark-ov) roster-list--mark-overlays)))
 
 (defun roster-list--apply-marks ()
   "Reapply mark overlays after a buffer refresh.
 After `revert-buffer' the buffer is repopulated and all overlay positions
 are stale.  We drop every existing overlay, then walk the new buffer to
 rebuild them at their current line positions."
-  (maphash (lambda (_id ov)
-             (when (overlayp ov) (delete-overlay ov)))
+  (maphash (lambda (_id ovs) (roster-list--delete-mark-overlays ovs))
            roster-list--mark-overlays)
   (clrhash roster-list--mark-overlays)
   (save-excursion
@@ -1343,8 +1353,8 @@ With an active region, mark all sessions in the region (no toggle)."
       (if (gethash id roster-list--marked)
           (progn
             (remhash id roster-list--marked)
-            (when-let ((ov (gethash id roster-list--mark-overlays)))
-              (delete-overlay ov)
+            (when-let ((ovs (gethash id roster-list--mark-overlays)))
+              (roster-list--delete-mark-overlays ovs)
               (remhash id roster-list--mark-overlays)))
         (puthash id t roster-list--marked)
         (roster-list--add-mark-overlay id))
@@ -1356,8 +1366,8 @@ With an active region, mark all sessions in the region (no toggle)."
   (let ((id (tabulated-list-get-id)))
     (unless id (user-error "No session on this line"))
     (remhash id roster-list--marked)
-    (when-let ((ov (gethash id roster-list--mark-overlays)))
-      (delete-overlay ov)
+    (when-let ((ovs (gethash id roster-list--mark-overlays)))
+      (roster-list--delete-mark-overlays ovs)
       (remhash id roster-list--mark-overlays))
     (forward-line 1)))
 
@@ -1477,8 +1487,6 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
       (setq-local roster-list-show-archived (if (null include-archived)
                                                 roster-list-include-archived
                                               include-archived))
-      (setq-local header-line-format
-                  "RET/e resume, d delete, r rename, a archive, R move, o dired, c create, t archived, g refresh | m mark, u unmark, U unmark-all, D delete-marked, A archive-marked")
       (tabulated-list-revert))
     (pop-to-buffer buffer)))
 
