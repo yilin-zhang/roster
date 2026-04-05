@@ -174,7 +174,7 @@ Must be a symbol present in `roster-enabled-tools'."
   "Hash table of marked session IDs in the current `roster' list buffer.")
 
 (defvar-local roster-list--mark-overlays (make-hash-table :test #'equal)
-  "Hash table mapping session ID to its mark overlay in the current buffer.")
+  "Hash table mapping session ID to a cons of two overlays in the current buffer.")
 
 ;;; Constants
 
