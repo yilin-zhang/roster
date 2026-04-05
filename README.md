@@ -1,13 +1,13 @@
 # Roster
 
 Roster is an Emacs package for managing AI coding sessions from OpenCode,
-Claude Code, and Codex.
+Claude Code, Codex, and pi.
 
 These tools accumulate sessions over time with no easy way to browse, resume, or
 clean them up. Roster puts all sessions in a unified `tabulated-list-mode`
-buffer — tagged `OC` for OpenCode, `CC` for Claude Code, and `CX` for Codex —
-and lets you resume, rename, archive, delete, and move them without leaving your
-editor.
+buffer — tagged `OC` for OpenCode, `CC` for Claude Code, `CX` for Codex, and
+`PI` for pi — and lets you resume, rename, archive, delete, and move them
+without leaving your editor.
 
 ## Install
 
@@ -26,7 +26,8 @@ editor.
              roster-delete-session
              roster-update-session-directory)
   :custom
-  (roster-enabled-tools '(opencode claude codex))
+  ;; Omit `roster-enabled-tools' to enable all supported agents automatically.
+  (roster-enabled-tools '(opencode claude codex pi))
   (roster-default-new-session-tool 'opencode)
   (roster-terminal-function #'roster-open-in-ghostty))
 ```
@@ -87,5 +88,9 @@ Directory moves (`R`) are only supported for OpenCode sessions.
   Archived sessions live in `~/.codex/archived_sessions/`; archiving and
   unarchiving moves files between the two directories. Custom titles are stored
   in `~/.codex/roster/UUID.roster.json` sidecar files.
+- pi sessions are read from JSONL files under `~/.pi/agent/sessions/`.
+  Archived state is stored in `~/.pi/agent/roster/UUID.roster.json` sidecar
+  files. Renames append `session_info` entries so pi itself sees the updated
+  display name.
 - Only root sessions are shown; child/subagent sessions are hidden.
 - Requires Emacs 29.1+ for built-in SQLite support.

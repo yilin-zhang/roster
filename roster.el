@@ -7,10 +7,10 @@
 
 ;;; Commentary:
 
-;; Roster manages AI coding sessions for OpenCode, Claude Code, and Codex inside Emacs.
+;; Roster manages AI coding sessions for OpenCode, Claude Code, Codex, and pi inside Emacs.
 ;;
 ;; Sessions from all tools are shown in a unified `tabulated-list-mode' buffer
-;; tagged "OC" (OpenCode), "CC" (Claude Code), or "CX" (Codex).  Supported operations:
+;; tagged "OC" (OpenCode), "CC" (Claude Code), "CX" (Codex), or "PI" (pi).  Supported operations:
 ;;   resume, rename, archive/unarchive, delete, and directory moves (OpenCode only).
 ;;
 ;; Storage backends:
@@ -22,6 +22,10 @@
 ;;   Codex     — reads JSONL files under `roster-codex-dir'/sessions/ (active) and
 ;;                 archived_sessions/ (archived).  Custom metadata is kept in
 ;;                 .roster.json sidecar files under `roster-codex-dir'/roster/.
+;;   pi        — reads JSONL files under `roster-pi-dir'/sessions/.  Custom metadata
+;;                 (archive state) is kept in .roster.json sidecar files under
+;;                 `roster-pi-dir'/roster/.  Renames append `session_info' entries so
+;;                 pi itself sees the updated display name.
 ;;
 ;; Requires Emacs 29.1+ for built-in SQLite support (sqlite.el).
 
@@ -87,6 +91,11 @@
   "Face for the Codex tool tag in `roster' lists."
   :group 'roster)
 
+(defface roster-list-tool-pi-face
+  `((t :foreground ,(face-attribute 'ansi-color-red :foreground)))
+  "Face for the pi tool tag in `roster' lists."
+  :group 'roster)
+
 (defface roster-list-mark-face
   '((((background dark)) (:background "DarkGoldenrod4"))
     (t (:background "LightYellow1")))
@@ -144,16 +153,27 @@ The function is called with two args: DIRECTORY and COMMAND."
   :type 'string
   :group 'roster)
 
-(defcustom roster-enabled-tools '(opencode claude codex)
+(defcustom roster-pi-dir
+  (expand-file-name "~/.pi/agent")
+  "Path to the pi configuration directory."
+  :type 'directory
+  :group 'roster)
+
+(defcustom roster-pi-command "pi"
+  "pi executable name or full path."
+  :type 'string
+  :group 'roster)
+
+(defcustom roster-enabled-tools '(opencode claude codex pi)
   "List of tools whose sessions are shown by roster.
-Valid elements are the symbols `opencode', `claude', and `codex'."
-  :type '(set (const opencode) (const claude) (const codex))
+Valid elements are the symbols `opencode', `claude', `codex', and `pi'."
+  :type '(set (const opencode) (const claude) (const codex) (const pi))
   :group 'roster)
 
 (defcustom roster-default-new-session-tool 'opencode
   "Default tool when creating a new session and multiple tools are enabled.
 Must be a symbol present in `roster-enabled-tools'."
-  :type '(choice (const opencode) (const claude) (const codex))
+  :type '(choice (const opencode) (const claude) (const codex) (const pi))
   :group 'roster)
 
 ;;; Variables
@@ -283,10 +303,11 @@ Signal a `user-error' when the command exits unsuccessfully."
 
 (defun roster--load-sessions ()
   "Return sessions from all enabled tools as a unified list, newest-first.
-Loads from OpenCode, Claude Code, and/or Codex per `roster-enabled-tools'."
+Loads from OpenCode, Claude Code, Codex, and/or pi per `roster-enabled-tools'."
   (let ((loaders `((opencode . ,#'roster--opencode-load-sessions)
                    (claude   . ,#'roster--claude-load-sessions)
-                   (codex    . ,#'roster--codex-load-sessions))))
+                   (codex    . ,#'roster--codex-load-sessions)
+                   (pi       . ,#'roster--pi-load-sessions))))
     (roster--sort-sessions
      (seq-mapcat
       (lambda (tool)
@@ -996,6 +1017,189 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
       (message "%s Codex session %s" past session-id)
       t)))
 
+;;; pi backend
+
+(defun roster--pi-sessions-dir ()
+  "Return the pi sessions directory."
+  (expand-file-name "sessions" roster-pi-dir))
+
+(defun roster--pi-roster-dir ()
+  "Return the directory used to store pi roster sidecar files."
+  (expand-file-name "roster" roster-pi-dir))
+
+(defun roster--pi-sidecar-path (session-id)
+  "Return the path to the roster sidecar JSON file for a pi session."
+  (expand-file-name (concat session-id ".roster.json")
+                    (roster--pi-roster-dir)))
+
+(defun roster--pi-read-sidecar (session-id)
+  "Return roster metadata alist for a pi session, or nil if no sidecar."
+  (roster--read-sidecar (roster--pi-sidecar-path session-id)))
+
+(defun roster--pi-write-sidecar (session-id title time-archived)
+  "Write roster sidecar JSON for a pi session."
+  (roster--write-sidecar (roster--pi-sidecar-path session-id) title time-archived))
+
+(defun roster--pi-content-text (content)
+  "Return the first useful text string from pi CONTENT."
+  (cond
+   ((and (stringp content)
+         (not (string-empty-p (string-trim content))))
+    (string-trim content))
+   ((listp content)
+    (catch 'found
+      (dolist (part content)
+        (when (and (listp part)
+                   (equal (plist-get part :type) "text"))
+          (let ((text (string-trim (or (plist-get part :text) ""))))
+            (unless (string-empty-p text)
+              (throw 'found text)))))
+      nil))))
+
+(defun roster--pi-parse-jsonl (path)
+  "Return metadata plist from a pi JSONL file at PATH.
+Returns plist with keys :id, :cwd, :title-candidate, :session-name,
+:last-entry-id, and :time-updated."
+  (condition-case nil
+      (let (session-id cwd title-candidate session-name last-entry-id)
+        (with-temp-buffer
+          (insert-file-contents path)
+          (goto-char (point-min))
+          (while (not (eobp))
+            (when-let* ((line (buffer-substring-no-properties (point) (line-end-position)))
+                        (obj (roster--claude-read-json line))
+                        (type (plist-get obj :type)))
+              (pcase type
+                ("session"
+                 (unless session-id
+                   (when-let ((value (plist-get obj :id)))
+                     (setq session-id value)))
+                 (unless cwd
+                   (when-let ((value (plist-get obj :cwd)))
+                     (setq cwd value))))
+                ((or "message" "model_change" "thinking_level_change" "compaction"
+                     "branch_summary" "custom" "custom_message" "label" "session_info")
+                 (when-let ((value (plist-get obj :id)))
+                   (setq last-entry-id value))
+                 (when (and (equal type "message") (not title-candidate))
+                   (let ((message (plist-get obj :message)))
+                     (when (equal (plist-get message :role) "user")
+                       (let ((text (roster--pi-content-text (plist-get message :content))))
+                         (unless (and text (string-prefix-p "/" text))
+                           (setq title-candidate text))))))
+                 (when (equal type "session_info")
+                   (when-let ((value (plist-get obj :name)))
+                     (unless (string-empty-p value)
+                       (setq session-name value)))))))
+            (forward-line 1)))
+        (let* ((attrs (file-attributes path))
+               (mtime (when attrs (file-attribute-modification-time attrs)))
+               (time-updated (if mtime (floor (* roster--ms-per-second (float-time mtime))) 0)))
+          (list :id session-id
+                :cwd (or cwd "")
+                :title-candidate title-candidate
+                :session-name session-name
+                :last-entry-id last-entry-id
+                :time-updated time-updated)))
+    (error nil)))
+
+(defun roster--pi-session-title (meta sidecar)
+  "Return display title derived from META and SIDECAR."
+  (let ((sidecar-title (cdr (assoc "title" sidecar)))
+        (session-name (plist-get meta :session-name))
+        (candidate (plist-get meta :title-candidate))
+        (cwd (plist-get meta :cwd)))
+    (or sidecar-title
+        session-name
+        (when candidate
+          (if (> (length candidate) roster--title-max-length)
+              (concat (substring candidate 0 (- roster--title-max-length 3)) "...")
+            candidate))
+        (let ((base (file-name-nondirectory (directory-file-name (expand-file-name (if (string-empty-p cwd) "~" cwd))))))
+          (unless (string-empty-p base) base))
+        roster--untitled)))
+
+(defun roster--pi-session-from-file (path)
+  "Return a unified pi session plist for JSONL file at PATH."
+  (when-let* ((meta (roster--pi-parse-jsonl path))
+              (session-id (plist-get meta :id)))
+    (let* ((sidecar (roster--pi-read-sidecar session-id))
+           (cwd (plist-get meta :cwd))
+           (dir (expand-file-name (if (string-empty-p cwd) "~" cwd)))
+           (time-archived (let ((value (cdr (assoc "time_archived" sidecar))))
+                            (when (numberp value) value))))
+      (list :id session-id
+            :title (roster--pi-session-title meta sidecar)
+            :directory dir
+            :project-id nil
+            :time-updated (plist-get meta :time-updated)
+            :time-archived time-archived
+            :tool 'pi
+            :file-path path
+            :last-entry-id (plist-get meta :last-entry-id)))))
+
+(defun roster--pi-load-sessions ()
+  "Return pi sessions as a list of unified session plists."
+  (let ((sessions-dir (roster--pi-sessions-dir)))
+    (when (file-directory-p sessions-dir)
+      (seq-keep #'roster--pi-session-from-file
+                (directory-files-recursively sessions-dir "\\.jsonl\\'")))))
+
+(defun roster--pi-entry-id ()
+  "Return a fresh pi session entry id."
+  (substring (md5 (format "%s-%s-%s" (float-time) (emacs-pid) (random))) 0 8))
+
+(defun roster--pi-append-session-info (session title)
+  "Append a pi `session_info' entry naming SESSION as TITLE."
+  (let* ((path (plist-get session :file-path))
+         (entry `(("type" . "session_info")
+                  ("id" . ,(roster--pi-entry-id))
+                  ("parentId" . ,(plist-get session :last-entry-id))
+                  ("timestamp" . ,(format-time-string "%Y-%m-%dT%H:%M:%S.%3NZ" (current-time) t))
+                  ("name" . ,title))))
+    (write-region (concat (json-encode entry) "\n") nil path t 'silent)))
+
+(defun roster--pi-delete-session (session)
+  "Delete a pi SESSION's JSONL file and roster sidecar."
+  (let* ((session-id (plist-get session :id))
+         (file-path (plist-get session :file-path))
+         (sidecar (roster--pi-sidecar-path session-id)))
+    (when (file-exists-p file-path)
+      (move-file-to-trash file-path))
+    (when (file-exists-p sidecar)
+      (delete-file sidecar))))
+
+(defun roster--pi-rename-session-command (session)
+  "Rename a pi SESSION by appending a `session_info' entry."
+  (let* ((session-id (plist-get session :id))
+         (old-title (roster--session-title session))
+         (new-title (roster--read-session-title session)))
+    (if (string= old-title new-title)
+        (progn (message "Session %s already uses that title" session-id) nil)
+      (roster--pi-append-session-info session new-title)
+      (message "Renamed pi session %s to %s" session-id new-title)
+      t)))
+
+(defun roster--pi-do-archive (session archived)
+  "Set a pi SESSION archived state to ARCHIVED without prompting."
+  (let* ((session-id (plist-get session :id))
+         (sidecar (roster--pi-read-sidecar session-id))
+         (sidecar-title (when sidecar (cdr (assoc "title" sidecar)))))
+    (roster--pi-write-sidecar
+     session-id sidecar-title
+     (when archived (floor (* roster--ms-per-second (float-time (current-time))))))))
+
+(defun roster--pi-set-archived-command (session archived)
+  "Set a pi SESSION archived state to ARCHIVED; return non-nil on change."
+  (let* ((session-id (plist-get session :id))
+         (title (plist-get session :title))
+         (verb (if archived "Archive" "Unarchive"))
+         (past (if archived "Archived" "Unarchived")))
+    (when (yes-or-no-p (format "%s pi session '%s' (%s)? " verb title session-id))
+      (roster--pi-do-archive session archived)
+      (message "%s pi session %s" past session-id)
+      t)))
+
 ;;; Tool helpers
 
 (defun roster--tool-label (session)
@@ -1003,6 +1207,7 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
   (pcase (roster--session-tool session)
     ('claude "CC")
     ('codex  "CX")
+    ('pi     "PI")
     (_       "OC")))
 
 (defun roster--tool-face (session)
@@ -1010,6 +1215,7 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
   (pcase (roster--session-tool session)
     ('claude 'roster-list-tool-claude-face)
     ('codex  'roster-list-tool-codex-face)
+    ('pi     'roster-list-tool-pi-face)
     (_       'roster-list-tool-opencode-face)))
 
 (defun roster--session-command (session)
@@ -1023,6 +1229,10 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
      (format "%s resume %s"
              roster-codex-command
              (shell-quote-argument (roster--session-id session))))
+    ('pi
+     (format "%s --session %s"
+             roster-pi-command
+             (shell-quote-argument (plist-get session :file-path))))
     (_
      (format "%s -s %s"
              roster-opencode-command
@@ -1033,6 +1243,7 @@ ARCHIVED is non-nil when PATH is from the archived_sessions directory."
   (pcase tool
     ('claude roster-claude-command)
     ('codex  roster-codex-command)
+    ('pi     roster-pi-command)
     (_ roster-opencode-command)))
 
 (defun roster--select-tool-for-new-session ()
@@ -1515,6 +1726,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-rename-session-command session))
     ('codex  (roster--codex-rename-session-command session))
+    ('pi     (roster--pi-rename-session-command session))
     (_       (roster--opencode-rename-session-command session))))
 
 (defun roster--opencode-do-archive (session archived)
@@ -1544,6 +1756,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-set-archived-command session archived))
     ('codex  (roster--codex-set-archived-command session archived))
+    ('pi     (roster--pi-set-archived-command session archived))
     (_       (roster--opencode-set-archived-command session archived))))
 
 (defun roster--do-delete-session (session)
@@ -1551,6 +1764,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-delete-session session))
     ('codex  (roster--codex-delete-session session))
+    ('pi     (roster--pi-delete-session session))
     (_       (roster--opencode-delete-session session))))
 
 (defun roster--do-archive-session (session archived)
@@ -1558,6 +1772,7 @@ When omitted or nil, the value of `roster-list-include-archived' is used."
   (pcase (plist-get session :tool)
     ('claude (roster--claude-do-archive session archived))
     ('codex  (roster--codex-do-archive session archived))
+    ('pi     (roster--pi-do-archive session archived))
     (_       (roster--opencode-do-archive session archived))))
 
 (defun roster--delete-session-command (session)
@@ -1596,12 +1811,13 @@ PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
 
 (defun roster--opencode-update-session-directory-command (session)
   "Move SESSION to another known OpenCode project directory.
-Signals a `user-error' for Claude Code and Codex sessions, which are not movable."
-  (when (memq (plist-get session :tool) '(claude codex))
+Signals a `user-error' for Claude Code, Codex, and pi sessions, which are not movable."
+  (when (memq (plist-get session :tool) '(claude codex pi))
     (user-error "Directory moves are not supported for %s sessions"
                 (pcase (plist-get session :tool)
                   ('claude "Claude Code")
-                  ('codex  "Codex"))))
+                  ('codex  "Codex")
+                  ('pi     "pi"))))
   (let* ((session-id (plist-get session :id))
          (old-dir (plist-get session :directory))
          (old-project-id (plist-get session :project-id))
