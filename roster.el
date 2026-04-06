@@ -218,8 +218,8 @@ Must be a symbol present in `roster-enabled-tools'."
   (plist-get session :id))
 
 (defun roster--session-title (session)
-  "Return SESSION title."
-  (plist-get session :title))
+  "Return SESSION title with control characters collapsed to spaces."
+  (replace-regexp-in-string "[[:cntrl:]]" " " (plist-get session :title)))
 
 (defun roster--session-directory (session)
   "Return SESSION directory."
@@ -1363,8 +1363,7 @@ When JUMP is non-nil, open the session directory in Dired first."
   (let ((directory (plist-get session :directory)))
     (list (plist-get session :id)
           (vector
-           (propertize (replace-regexp-in-string "[[:cntrl:]]" " "
-                                               (roster--session-title session))
+           (propertize (roster--session-title session)
                        'face 'roster-list-title-face)
            (propertize (roster--tool-label session) 'face (roster--tool-face session))
            (propertize (upcase (roster--session-state session)) 'face (roster--state-face session))
@@ -1657,9 +1656,9 @@ If no sessions are marked, toggle archive state of the session at point
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'roster-list-resume)
     (define-key map (kbd "e") #'roster-list-resume)
-    (define-key map (kbd "d") #'roster-list-delete)
+    (define-key map (kbd "d") #'roster-list-delete-marked)
     (define-key map (kbd "r") #'roster-list-rename)
-    (define-key map (kbd "a") #'roster-list-toggle-archive)
+    (define-key map (kbd "a") #'roster-list-archive-marked)
     (define-key map (kbd "R") #'roster-list-move-directory)
     (define-key map (kbd "o") #'roster-list-open-directory)
     (define-key map (kbd "c") #'roster-list-new-session)
@@ -1668,8 +1667,6 @@ If no sessions are marked, toggle archive state of the session at point
     (define-key map (kbd "m") #'roster-list-mark)
     (define-key map (kbd "u") #'roster-list-unmark)
     (define-key map (kbd "U") #'roster-list-unmark-all)
-    (define-key map (kbd "D") #'roster-list-delete-marked)
-    (define-key map (kbd "A") #'roster-list-archive-marked)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `roster-list-mode'.")
