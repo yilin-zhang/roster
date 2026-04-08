@@ -178,9 +178,6 @@ Must be a symbol present in `roster-enabled-tools'."
 
 ;;; Variables
 
-(defvar roster--completion-directory-map nil
-  "Alist from displayed candidate title to session directory.")
-
 (defvar roster-list-buffer-name "*roster*"
   "Buffer name used for the main `roster' session list.")
 
@@ -232,13 +229,6 @@ Must be a symbol present in `roster-enabled-tools'."
           (> (or (plist-get a :time-updated) 0)
              (or (plist-get b :time-updated) 0)))))
 
-(defun roster--select-from-sessions (sessions prompt missing-message)
-  "Select one entry from SESSIONS using PROMPT.
-Signal MISSING-MESSAGE when SESSIONS is empty."
-  (unless sessions
-    (user-error "%s" missing-message))
-  (roster--select-session sessions prompt))
-
 (defun roster--session-archived-p (session)
   "Return non-nil when SESSION is archived."
   (numberp (plist-get session :time-archived)))
@@ -246,16 +236,6 @@ Signal MISSING-MESSAGE when SESSIONS is empty."
 (defun roster--active-sessions (sessions)
   "Return unarchived SESSIONS."
   (seq-remove #'roster--session-archived-p sessions))
-
-(defun roster--archived-sessions (sessions)
-  "Return archived SESSIONS."
-  (seq-filter #'roster--session-archived-p sessions))
-
-(defun roster--session-display-title (session)
-  "Return display title for SESSION."
-  (if (roster--session-archived-p session)
-      (format "%s [archived]" (plist-get session :title))
-    (plist-get session :title)))
 
 (defun roster--session-state (session)
   "Return display state for SESSION."
@@ -1256,26 +1236,6 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
                (symbol-name roster-default-new-session-tool)))
     (or (car roster-enabled-tools) 'opencode)))
 
-(defun roster--session-labels (sessions)
-  "Build completion labels for SESSIONS.
-Labels use title only. Duplicate titles are numbered as (1), (2), (3)."
-  (let ((totals (make-hash-table :test #'equal))
-        (seen (make-hash-table :test #'equal))
-        labels)
-    (dolist (s sessions)
-      (let ((title (roster--session-display-title s)))
-        (puthash title (1+ (gethash title totals 0)) totals)))
-    (dolist (s sessions)
-      (let* ((title (roster--session-display-title s))
-             (total (gethash title totals 0))
-             (idx (1+ (gethash title seen 0)))
-             (label (if (> total 1)
-                        (format "%s (%d)" title idx)
-                      title)))
-        (puthash title idx seen)
-        (push (cons label s) labels)))
-    (nreverse labels)))
-
 (defun roster--ensure-session-title (title)
   "Return trimmed TITLE or signal a `user-error'."
   (let ((value (string-trim title)))
@@ -1289,25 +1249,6 @@ The return value is trimmed and guaranteed non-empty."
   (roster--ensure-session-title
    (read-string (format "Rename session (%s): " (roster--session-title session))
                 (roster--session-title session))))
-
-(defun roster--session-annotation (candidate)
-  "Return shadow annotation for completion CANDIDATE."
-  (let ((dir (alist-get candidate roster--completion-directory-map nil nil #'string=)))
-    (when dir
-      (concat " " (propertize dir 'face 'shadow)))))
-
-(defun roster--select-session (sessions prompt)
-  "Ask user to select from SESSIONS with PROMPT.
-Return the selected session plist."
-  (let* ((table (roster--session-labels sessions))
-         (roster--completion-directory-map
-          (mapcar (lambda (pair)
-                    (cons (car pair) (plist-get (cdr pair) :directory)))
-                  table))
-         (completion-extra-properties
-          '(:annotation-function roster--session-annotation))
-         (choice (completing-read prompt table nil t)))
-    (cdr (assoc choice table))))
 
 ;;; Project scoping
 
@@ -1846,61 +1787,6 @@ Signals a `user-error' for Claude Code, Codex, and pi sessions, which are not mo
 ;;; Public commands
 
 ;;;###autoload
-(defun roster-update-session-directory ()
-  "Safely move a session to another known OpenCode project directory.
-
-This updates both `session.directory' and `session.project_id', and only
-allows targets that already exist in the OpenCode `project' table."
-  (interactive)
-  (roster--opencode-update-session-directory-command
-   (roster--select-from-sessions
-    (roster--load-sessions)
-    "Select OpenCode session to move: "
-    "No OpenCode sessions found")))
-
-;;;###autoload
-(defun roster-rename-session ()
-  "Rename an existing session."
-  (interactive)
-  (roster--rename-session-command
-   (roster--select-from-sessions
-    (roster--active-sessions (roster--load-sessions))
-    "Select session to rename: "
-    "No active sessions found")))
-
-;;;###autoload
-(defun roster-archive-session ()
-  "Archive an active session."
-  (interactive)
-  (roster--opencode-set-session-archived-command
-   (roster--select-from-sessions
-    (roster--active-sessions (roster--load-sessions))
-    "Select session to archive: "
-    "No active sessions found")
-   t))
-
-;;;###autoload
-(defun roster-unarchive-session ()
-  "Unarchive an existing session."
-  (interactive)
-  (roster--opencode-set-session-archived-command
-   (roster--select-from-sessions
-    (roster--archived-sessions (roster--load-sessions))
-    "Select session to unarchive: "
-    "No archived sessions found")
-   nil))
-
-;;;###autoload
-(defun roster-delete-session ()
-  "Delete an existing session."
-  (interactive)
-  (roster--delete-session-command
-   (roster--select-from-sessions
-    (roster--load-sessions)
-    "Select session to delete: "
-    "No sessions found")))
-
-;;;###autoload
 (defun roster-list-sessions ()
   "Open a Dired-like buffer for managing sessions."
   (interactive)
@@ -1915,49 +1801,6 @@ allows targets that already exist in the OpenCode `project' table."
      (format "%s<%s>" roster-list-buffer-name (file-name-nondirectory (directory-file-name scope)))
      (lambda ()
        (roster--project-scoped-sessions (roster--load-sessions))))))
-
-;;;###autoload
-(defun roster-open-session (&optional arg)
-  "Choose a session and resume it.
-With a prefix argument, open the session directory in Dired first.
-If there are no sessions, prompt for a directory and start a new one."
-  (interactive "P")
-  (let ((sessions (roster--load-sessions)))
-    (if sessions
-        (roster--resume-session
-         (roster--select-session sessions "Select session to resume: ")
-         arg)
-      (roster--start-new-session-with-directory-prompt))))
-
-;;;###autoload
-(defun roster-open-session-project (&optional arg)
-  "Choose and resume a session under the current project scope.
-If current directory belongs to a project, scope is project root and subdirs.
-Otherwise scope is current directory and subdirs.
-With a prefix argument, open the session directory in Dired first.
-If no matching session exists, prompt for a directory and start a new one."
-  (interactive "P")
-  (let* ((sessions (roster--load-sessions))
-         (scope (roster--project-scope-directory))
-         (scoped-sessions (roster--project-scoped-sessions sessions)))
-    (if scoped-sessions
-        (roster--resume-session
-         (roster--select-session scoped-sessions
-                                 (format "Select session in project scope (%s): " scope))
-         arg)
-      (roster--start-new-session-with-directory-prompt))))
-
-;;;###autoload
-(defun roster-open-latest-session-project ()
-  "Resume the latest active session in the current project scope.
-If none exists, prompt for a directory and start a new one."
-  (interactive)
-  (let* ((sessions (roster--load-sessions))
-         (scoped-sessions (roster--active-sessions
-                           (roster--project-scoped-sessions sessions))))
-    (if scoped-sessions
-        (roster--resume-session (car scoped-sessions))
-      (roster--start-new-session-with-directory-prompt))))
 
 (provide 'roster)
 

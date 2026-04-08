@@ -15,16 +15,8 @@ without leaving your editor.
 (use-package roster
   :ensure nil
   :load-path "~/.emacs.d/site-lisp/roster/"
-  :commands (roster-open-session
-             roster-open-session-project
-             roster-list-sessions
-             roster-list-project-sessions
-             roster-open-latest-session-project
-             roster-rename-session
-             roster-archive-session
-             roster-unarchive-session
-             roster-delete-session
-             roster-update-session-directory)
+  :commands (roster-list-sessions
+             roster-list-project-sessions)
   :custom
   ;; Omit `roster-enabled-tools' to enable all supported agents automatically.
   (roster-enabled-tools '(opencode claude codex pi))
@@ -41,38 +33,28 @@ available. If you prefer iTerm:
 
 ## Usage
 
-### Quick commands
+Two entry points open the session list:
 
-These work without opening the session list:
+- `roster-list-sessions` — full session list
+- `roster-list-project-sessions` — sessions filtered to the current project
 
-- `roster-open-session` — pick any session and resume it
-- `roster-open-session-project` — pick a session scoped to the current project
-- `roster-open-latest-session-project` — resume the most recent session in the current project
-- `roster-list-sessions` — open the full session list
-- `roster-list-project-sessions` — open the session list filtered to the current project
+From the list buffer:
 
-### Session list
-
-`roster-list-sessions` opens a tabulated buffer showing all sessions. From
-there:
-
-| Key         | Action                                    |
-|-------------|-------------------------------------------|
-| `RET` / `e` | Resume session                            |
-| `r`         | Rename session                            |
-| `a`         | Archive or unarchive session              |
-| `d`         | Delete session                            |
-| `R`         | Move session to another project directory |
-| `o`         | Open session directory in Dired           |
-| `c`         | Create a new session                      |
-| `t`         | Toggle display of archived sessions       |
-| `g`         | Refresh                                   |
-| `q`         | Quit                                      |
-| `m`         | Mark session at point (or region)         |
-| `u`         | Unmark session at point                   |
-| `U`         | Unmark all                                |
-| `D`         | Delete all marked sessions                |
-| `A`         | Archive/unarchive all marked sessions     |
+| Key         | Action                                                  |
+|-------------|---------------------------------------------------------|
+| `RET` / `e` | Resume session                                          |
+| `r`         | Rename session                                          |
+| `a`         | Archive/unarchive marked sessions (or session at point) |
+| `d`         | Delete marked sessions (or session at point)            |
+| `R`         | Move session to another project directory               |
+| `o`         | Open session directory in Dired                         |
+| `c`         | Create a new session                                    |
+| `t`         | Toggle display of archived sessions                     |
+| `g`         | Refresh                                                 |
+| `q`         | Quit                                                    |
+| `m`         | Mark session at point (or region)                       |
+| `u`         | Unmark session at point                                 |
+| `U`         | Unmark all                                              |
 
 Directory moves (`R`) are only supported for OpenCode sessions.
 
