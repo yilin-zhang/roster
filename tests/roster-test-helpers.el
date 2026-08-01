@@ -16,7 +16,7 @@
   "Eval BODY with `roster--opencode-sqlite-rows' mocked to return ROWS."
   (declare (indent 1))
   `(cl-letf (((symbol-function 'roster--opencode-sqlite-rows) (lambda (_sql) ,rows)))
-	 ,@body))
+     ,@body))
 
 (provide 'roster-test-helpers)
 

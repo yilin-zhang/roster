@@ -61,7 +61,7 @@
 (ert-deftest roster-claude-title-prefers-custom-title-to-ai-title ()
   "An explicit /rename remains authoritative over generated titles."
   (let ((meta '(:custom-title "Chosen title" :ai-title "Generated title"
-			                  :slug "old-slug" :title-candidate "First prompt")))
+			      :slug "old-slug" :title-candidate "First prompt")))
     (should (equal (roster--claude-title meta nil) "Chosen title"))))
 
 (ert-deftest roster-claude-archive-preserves-sidecar-title ()

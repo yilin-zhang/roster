@@ -13,29 +13,29 @@
 (ert-deftest roster-load-sessions-only-returns-root-sessions ()
   (let ((roster-enabled-tools '(opencode)))
     (roster-test--with-sqlite-rows
-        '(("ses_root"     "Root Session"     "/tmp/root"     "proj_root"     "1700000000000" "")
-          ("ses_archived" "Archived Session" "/tmp/archived" "proj_archived" "1700000001000" "1700000002000"))
+	'(("ses_root"     "Root Session"     "/tmp/root"     "proj_root"     "1700000000000" "")
+	  ("ses_archived" "Archived Session" "/tmp/archived" "proj_archived" "1700000001000" "1700000002000"))
       (let ((sessions (roster--load-sessions)))
-        (should (= (length sessions) 2))
-        (should (equal (mapcar (lambda (s) (plist-get s :id)) sessions)
+	(should (= (length sessions) 2))
+	(should (equal (mapcar (lambda (s) (plist-get s :id)) sessions)
                        '("ses_archived" "ses_root")))
-        (should (= (plist-get (car sessions) :time-archived) 1700000002000))
-        (should-not (plist-get (cadr sessions) :time-archived))))))
+	(should (= (plist-get (car sessions) :time-archived) 1700000002000))
+	(should-not (plist-get (cadr sessions) :time-archived))))))
 
 (ert-deftest roster-load-sessions-handles-pipe-in-directory ()
   "Pipe characters in directory paths must not corrupt adjacent fields."
   (let ((roster-enabled-tools '(opencode)))
     (roster-test--with-sqlite-rows
-        '(("ses_pipe" "Pipe Dir" "/tmp/a|b" "proj_pipe" "1700000000000" ""))
+	'(("ses_pipe" "Pipe Dir" "/tmp/a|b" "proj_pipe" "1700000000000" ""))
       (let* ((sessions (roster--load-sessions))
              (session (car sessions)))
-        (should (= (length sessions) 1))
-        (should (equal (plist-get session :id) "ses_pipe"))
-        (should (equal (plist-get session :title) "Pipe Dir"))
-        (should (string-suffix-p "/tmp/a|b" (plist-get session :directory)))
-        (should (equal (plist-get session :project-id) "proj_pipe"))
-        (should (= (plist-get session :time-updated) 1700000000000))
-        (should-not (plist-get session :time-archived))))))
+	(should (= (length sessions) 1))
+	(should (equal (plist-get session :id) "ses_pipe"))
+	(should (equal (plist-get session :title) "Pipe Dir"))
+	(should (string-suffix-p "/tmp/a|b" (plist-get session :directory)))
+	(should (equal (plist-get session :project-id) "proj_pipe"))
+	(should (= (plist-get session :time-updated) 1700000000000))
+	(should-not (plist-get session :time-archived))))))
 
 ;;; Project resolution
 
@@ -49,8 +49,8 @@
             ((symbol-function 'roster--opencode-global-project)
              (lambda ()
                (error "should not fall back to global when exact match exists"))))
-	(should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/site-lisp/decklet") :id)
-			       "proj_exact"))))
+    (should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/site-lisp/decklet") :id)
+		   "proj_exact"))))
 
 (ert-deftest roster-resolve-target-project-falls-back-to-global ()
   (cl-letf (((symbol-function 'roster--opencode-project-for-directory)
@@ -60,8 +60,8 @@
             ((symbol-function 'roster--opencode-global-project)
              (lambda ()
                '(:id "global" :worktree "/"))))
-	(should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/site-lisp") :id)
-			       "global"))))
+    (should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/site-lisp") :id)
+		   "global"))))
 
 (ert-deftest roster-resolve-target-project-uses-only-parent-project ()
   (cl-letf (((symbol-function 'roster--opencode-project-for-directory)
@@ -72,8 +72,8 @@
             ((symbol-function 'roster--opencode-global-project)
              (lambda ()
                (error "should not fall back to global when parent exists"))))
-	(should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/root/subdir") :id)
-			       "proj_parent"))))
+    (should (equal (plist-get (roster--opencode-resolve-target-project "/tmp/root/subdir") :id)
+		   "proj_parent"))))
 
 ;;; SQLite integration (requires sqlite3 CLI or Emacs 29+ built-in)
 
@@ -87,13 +87,13 @@ Includes a pipe character in a field value to confirm it is not misinterpreted."
     (unwind-protect
         (progn
           (sqlite-execute conn
-			              (concat "CREATE TABLE session "
-				                  "(id TEXT, title TEXT, directory TEXT, "
-				                  "project_id TEXT, time_updated INTEGER, "
-				                  "time_archived INTEGER, parent_id TEXT)"))
+			  (concat "CREATE TABLE session "
+				  "(id TEXT, title TEXT, directory TEXT, "
+				  "project_id TEXT, time_updated INTEGER, "
+				  "time_archived INTEGER, parent_id TEXT)"))
           (sqlite-execute conn
-			              (concat "INSERT INTO session VALUES "
-				                  "('ses_int','Int|Test','/tmp/a|b','proj_1',1700000000000,NULL,NULL)"))
+			  (concat "INSERT INTO session VALUES "
+				  "('ses_int','Int|Test','/tmp/a|b','proj_1',1700000000000,NULL,NULL)"))
           (sqlite-close conn)
           (setq conn nil)
           (let ((sessions (roster--load-sessions)))

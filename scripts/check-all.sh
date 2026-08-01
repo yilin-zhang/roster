@@ -5,11 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "[1/6] Check parentheses"
-emacs --batch --eval '(dolist (file (append (directory-files "." t "\\.el\\'")
-                                            (directory-files "tests" t "\\.el\\'")))
-                        (with-temp-buffer
-                          (insert-file-contents file)
-                          (check-parens)))'
+emacs --batch -Q -l scripts/roster-check.el -f roster-check-parens
 
 echo "[2/6] Check indentation"
 ./scripts/check-indent.sh

@@ -4,24 +4,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-emacs --batch --eval "(progn
-  (require 'cl-lib)
-  (let ((files (append (directory-files \".\" nil \"\\\\.el\\\\'\")
-                       (mapcar (lambda (file) (concat \"tests/\" file))
-                               (directory-files \"tests\" nil \"\\\\.el\\\\'\"))))
-        (bad-files '()))
-    (dolist (file files)
-      (with-temp-buffer
-        (insert-file-contents file)
-        (let ((original (buffer-string)))
-          (emacs-lisp-mode)
-          (indent-region (point-min) (point-max))
-          (unless (string-equal original (buffer-string))
-            (push file bad-files)))))
-    (if bad-files
-        (progn
-          (princ \"Indentation check failed for:\n\")
-          (dolist (file (nreverse bad-files))
-            (princ (format \"  %s\n\" file)))
-          (kill-emacs 1))
-      (princ \"Indentation looks good.\n\"))))"
+if [[ "${1:-}" == "--fix" ]]; then
+  export ROSTER_FIX_INDENT=1
+fi
+
+# Load test definitions so their custom macro indentation declarations apply.
+emacs --batch -Q -L . -L tests \
+  -l roster -l tests/roster-test.el -l scripts/roster-check.el \
+  -f roster-check-indent
