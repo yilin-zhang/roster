@@ -52,6 +52,9 @@ TITLE and TIME-ARCHIVED are stored as sidecar fields; either may be nil."
   "Return metadata plist from a pi JSONL file at PATH.
 Returns plist with keys :id, :cwd, :title-candidate, :session-name,
 :last-entry-id, and :time-updated."
+  ;; Compatibility implementation of pi's public SessionManager/session-file
+  ;; contract.  Keep this until pi provides an installed, stable management
+  ;; executable; its SDK is currently a separate JavaScript import surface.
   (condition-case nil
       (let (session-id cwd title-candidate session-name last-entry-id)
         (with-temp-buffer
@@ -143,6 +146,9 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
 
 (defun roster--pi-append-session-info (session title)
   "Append a pi `session_info' entry naming SESSION as TITLE."
+  ;; This is pi's documented native format and the same operation exposed as
+  ;; SessionManager.appendSessionInfo()/pi.setSessionName().  Prefer a future
+  ;; management CLI or standalone RPC endpoint when one becomes available.
   (let* ((path (plist-get session :file-path))
          (entry `(("type" . "session_info")
                   ("id" . ,(roster--pi-entry-id))
@@ -153,6 +159,8 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
 
 (defun roster--pi-delete-session (session)
   "Delete a pi SESSION's JSONL file and roster sidecar."
+  ;; pi's official session documentation explicitly defines deletion as
+  ;; removing the JSONL and recommends trash when available.
   (let* ((session-id (plist-get session :id))
          (file-path (plist-get session :file-path))
          (sidecar (roster--pi-sidecar-path session-id)))
@@ -167,6 +175,8 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
 
 (defun roster--pi-do-archive (session archived)
   "Set a pi SESSION archived state to ARCHIVED without prompting."
+  ;; pi has no archive concept.  Keep this roster-only display state separate
+  ;; from the native session tree.
   (let* ((session-id (plist-get session :id))
          (sidecar (roster--pi-read-sidecar session-id))
          (sidecar-title (when sidecar (cdr (assoc "title" sidecar)))))

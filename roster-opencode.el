@@ -2,12 +2,14 @@
 
 ;;; Commentary:
 
-;; Internal library for roster.
+;; OpenCode backend using the official local server API.
 
 ;;; Code:
 
 (require 'roster-core)
-(require 'sqlite)
+(require 'url)
+(require 'url-http)
+(require 'url-util)
 
 ;;; OpenCode backend
 
@@ -16,187 +18,291 @@
   "Face for the OpenCode tool tag in `roster' lists."
   :group 'roster)
 
-(defcustom roster-opencode-db-path
-  (expand-file-name "~/.local/share/opencode/opencode.db")
-  "Path to OpenCode SQLite database."
-  :type 'file
-  :group 'roster)
-
 (defcustom roster-opencode-command "opencode"
   "OpenCode executable name or full path."
   :type 'string
   :group 'roster)
 
-(defun roster--opencode-sql-quote (value)
-  "Return SQL single-quoted VALUE with escaped apostrophes."
-  (concat "'" (replace-regexp-in-string "'" "''" value t t) "'"))
+(defcustom roster-opencode-db-path
+  (expand-file-name "~/.local/share/opencode/opencode.db")
+  "Path to the OpenCode database used only for legacy unarchive support.
+OpenCode's server API currently supports archiving but not clearing an archive
+timestamp.  This compatibility option can be removed when it gains a native
+unarchive operation."
+  :type 'file
+  :group 'roster)
 
-(defun roster--opencode-sqlite-open ()
-  "Open the OpenCode database and return a connection.
-Signal `user-error' if the file is missing or the database cannot be opened."
-  (unless (file-readable-p roster-opencode-db-path)
-    (user-error "OpenCode database not found: %s" roster-opencode-db-path))
-  (condition-case err
-      (sqlite-open roster-opencode-db-path)
-    (error (user-error "Cannot open OpenCode database: %s"
-                       (error-message-string err)))))
+(defconst roster--opencode-server-timeout 5
+  "Seconds to wait for OpenCode's local server and HTTP responses.")
 
-(defun roster--opencode-sqlite-rows (sql)
-  "Run SELECT SQL against the OpenCode database; return a list of rows.
-Each row is a list of strings (NULL values become empty strings).
-Returns nil when the result set is empty."
-  (let ((db (roster--opencode-sqlite-open)))
-    ;; `unwind-protect' ensures the connection is closed even when an error
-    ;; is signalled inside the body.  `format "%s"' coerces integers and
-    ;; other non-string SQL values to strings so callers get a uniform type.
+(defvar roster--opencode-process nil)
+(defvar roster--opencode-output nil)
+(defvar roster--opencode-base-url nil)
+
+;;; Server lifecycle
+
+(defun roster--opencode-server-url (buffer)
+  "Return the OpenCode server URL announced in BUFFER, or nil."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward
+             "opencode server listening on \\(http://[^[:space:]]+\\)" nil t)
+        (match-string-no-properties 1)))))
+
+(defun roster--opencode-wait-for-server (process buffer)
+  "Wait for PROCESS to announce its URL in BUFFER and return that URL."
+  (let ((deadline (+ (float-time) roster--opencode-server-timeout))
+        url)
+    (while (and (not url)
+                (process-live-p process)
+                (< (float-time) deadline))
+      (accept-process-output process 0.05)
+      (setq url (roster--opencode-server-url buffer)))
+    (or url
+        (user-error "OpenCode server failed to start: %s"
+                    (string-trim
+                     (with-current-buffer buffer (buffer-string)))))))
+
+(defun roster--opencode-call-with-server (function)
+  "Call FUNCTION while one scoped OpenCode server is available."
+  (let ((output (generate-new-buffer " *roster-opencode-server*"))
+        process)
     (unwind-protect
-        (mapcar (lambda (row)
-                  (mapcar (lambda (v) (if v (format "%s" v) "")) row))
-                (sqlite-select db sql))
-      (sqlite-close db))))
+        (progn
+          ;; This is a fresh loopback-only server on an ephemeral port.  Do not
+          ;; inherit credentials intended for a user's persistent server.
+          (let ((process-environment
+                 (seq-remove
+                  (lambda (entry)
+                    (string-match-p
+                     "\\`OPENCODE_SERVER_\\(?:PASSWORD\\|USERNAME\\)=" entry))
+                  process-environment)))
+            (setq process
+                  (make-process
+                   :name "roster-opencode-server"
+                   :buffer output
+                   :stderr output
+                   :command (list roster-opencode-command "serve" "--pure"
+                                  "--hostname" "127.0.0.1" "--port" "0")
+                   :connection-type 'pipe
+                   :coding 'utf-8-unix
+                   :noquery t)))
+          (let ((roster--opencode-process process)
+                (roster--opencode-output output)
+                (roster--opencode-base-url
+                 (roster--opencode-wait-for-server process output)))
+            (funcall function)))
+      (when (process-live-p process)
+        (delete-process process))
+      (kill-buffer output))))
 
-(defun roster--opencode-sqlite-exec-change-p (sql)
-  "Run a single DML SQL statement against the OpenCode database.
-Return non-nil when exactly one row was affected."
-  (let ((db (roster--opencode-sqlite-open)))
-    (unwind-protect
-        (= 1 (sqlite-execute db sql))
-      (sqlite-close db))))
+(defun roster--opencode-call-with-server-if-needed (function)
+  "Call FUNCTION, reusing the dynamically scoped OpenCode server."
+  (if (and roster--opencode-process
+           (process-live-p roster--opencode-process)
+           roster--opencode-base-url)
+      (funcall function)
+    (roster--opencode-call-with-server function)))
 
-(defun roster--opencode-parse-project-row (row)
-  "Return project plist parsed from SQLite ROW (a list of strings)."
-  (pcase-let ((`(,id ,worktree ,name) row))
-    (list :id id
-          :worktree (expand-file-name worktree)
-          :name (unless (string-empty-p name) name))))
+;;; HTTP protocol
 
-(defun roster--opencode-parse-session-row (row)
-  "Return OpenCode session plist parsed from SQLite ROW (a list of strings)."
-  (pcase-let ((`(,id ,title ,directory ,project-id ,time-updated ,archived-raw) row))
-    (list :id id
-          :title (if (string-empty-p title) roster--untitled title)
-          :directory (expand-file-name directory)
-          :project-id project-id
-          :time-updated (string-to-number (or time-updated "0"))
-          :time-archived (unless (string-empty-p (or archived-raw ""))
-                           (string-to-number archived-raw))
+(defun roster--opencode-query-string (parameters)
+  "Return URL query string for non-nil PARAMETERS."
+  (when-let ((values
+              (seq-keep
+               (lambda (pair)
+                 (when (cdr pair)
+                   (format "%s=%s" (car pair)
+                           (url-hexify-string (format "%s" (cdr pair))))))
+               parameters)))
+    (concat "?" (string-join values "&"))))
+
+(defun roster--opencode-response (buffer)
+  "Decode an OpenCode HTTP response in BUFFER.
+Return a cons of the response headers and decoded JSON body."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (let ((status (if (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)")
+                      (string-to-number (match-string 1))
+                    0))
+          headers)
+      (while (re-search-forward
+              "^\\([^:\r\n]+\\):[[:space:]]*\\([^\r\n]*\\)\r?$"
+              (save-excursion
+                (re-search-forward "\r?\n\r?\n" nil 'move)
+                (point))
+              t)
+        (push (cons (downcase (match-string-no-properties 1))
+                    (match-string-no-properties 2))
+              headers))
+      (re-search-forward "\r?\n\r?\n" nil 'move)
+      (let* ((raw-body (unless (eobp)
+                         (buffer-substring-no-properties (point) (point-max))))
+             ;; `url-retrieve-synchronously' leaves JSON response bodies as
+             ;; unibyte strings.  Decode UTF-8 explicitly so non-ASCII titles
+             ;; are not rendered as replacement characters.
+             (body (when raw-body
+                     (roster--read-json
+                      (if (multibyte-string-p raw-body)
+                          raw-body
+                        (decode-coding-string raw-body 'utf-8 t))))))
+        (unless (<= 200 status 299)
+          (user-error "OpenCode API returned HTTP %s: %s" status body))
+        (cons headers body)))))
+
+(defun roster--opencode-request (method path &optional parameters body)
+  "Send METHOD to OpenCode PATH with PARAMETERS and JSON BODY.
+Return a cons of response headers and decoded JSON body."
+  (roster--opencode-call-with-server-if-needed
+   (lambda ()
+     (let* ((url-request-method method)
+            (url-request-extra-headers
+             (when body '(("Content-Type" . "application/json"))))
+            (url-request-data (when body (encode-coding-string
+                                          (json-encode body) 'utf-8)))
+            (url-proxy-services nil)
+            (url (concat roster--opencode-base-url path
+                         (roster--opencode-query-string parameters)))
+            (buffer (url-retrieve-synchronously
+                     url t nil roster--opencode-server-timeout)))
+       (unless buffer
+         (user-error "OpenCode API did not respond: %s %s" method path))
+       (unwind-protect
+           (roster--opencode-response buffer)
+         (kill-buffer buffer))))))
+
+(defun roster--opencode-api-body (method path &optional parameters body)
+  "Return decoded OpenCode response body for METHOD and PATH."
+  (cdr (roster--opencode-request method path parameters body)))
+
+;;; Session loading
+
+(defun roster--opencode-session-from-api (value)
+  "Return unified session parsed from OpenCode API VALUE."
+  (let ((time (plist-get value :time)))
+    (list :id (plist-get value :id)
+          :title (or (plist-get value :title) roster--untitled)
+          :directory (expand-file-name
+                      (or (plist-get value :directory) "~"))
+          :project-id (plist-get value :projectID)
+          :time-updated (or (plist-get time :updated) 0)
+          :time-archived (plist-get time :archived)
           :tool 'opencode)))
 
-(defun roster--opencode-query-projects (sql)
-  "Return project plists for SQL query SQL."
-  (mapcar #'roster--opencode-parse-project-row (roster--opencode-sqlite-rows sql)))
+(defun roster--opencode-list-page (include-archived &optional cursor)
+  "Return one root-session page and next cursor for INCLUDE-ARCHIVED and CURSOR."
+  (let* ((response
+          (roster--opencode-request
+           "GET" "/experimental/session"
+           `(("roots" . "true")
+             ("archived" . ,(when include-archived "true"))
+             ("limit" . "100")
+             ("cursor" . ,cursor))))
+         (headers (car response)))
+    (cons (cdr response) (cdr (assoc "x-next-cursor" headers)))))
 
 (defun roster--opencode-load-sessions (&optional include-archived)
-  "Return root OpenCode sessions as a list of plists.
-Each plist has keys :id, :title, :directory, :project-id,
-:time-updated, :time-archived, and :tool (always `opencode')."
-  (mapcar #'roster--opencode-parse-session-row
-          (roster--opencode-sqlite-rows
-           (concat "SELECT id, title, directory, project_id, time_updated, "
-                   "COALESCE(time_archived, '') "
-                   "FROM session WHERE parent_id IS NULL "
-                   (unless include-archived "AND time_archived IS NULL ")
-                   "ORDER BY time_updated DESC;"))))
+  "Return root OpenCode sessions through the official local server API.
+INCLUDE-ARCHIVED controls whether archived sessions are included."
+  (roster--opencode-call-with-server
+   (lambda ()
+     (let (sessions cursor)
+       (while
+           (let ((page (roster--opencode-list-page include-archived cursor)))
+             (setq sessions
+                   (nconc sessions
+                          (mapcar #'roster--opencode-session-from-api (car page)))
+                   cursor (cdr page))))
+       sessions))))
 
-(defun roster--opencode-project-for-directory (directory)
-  "Return project plist for DIRECTORY when it matches a project worktree exactly."
-  (let* ((dir (directory-file-name (expand-file-name directory)))
-         (sql (concat
-               "SELECT id, worktree, COALESCE(name, '') FROM project "
-               "WHERE worktree = " (roster--opencode-sql-quote dir) " LIMIT 1;"))
-         (projects (roster--opencode-query-projects sql)))
-    (car projects)))
+;;; Mutations
 
-(defun roster--opencode-projects-containing-directory (directory)
-  "Return OpenCode projects whose worktrees contain DIRECTORY."
-  (let* ((dir (directory-file-name (expand-file-name directory)))
-         (sql (concat
-               "SELECT id, worktree, COALESCE(name, '') FROM project "
-               ;; Exact match OR strict prefix: dir is longer than worktree
-               ;; AND dir starts with worktree followed by '/'.  Ordered
-               ;; longest-worktree-first so the most specific match is first.
-               "WHERE worktree = " (roster--opencode-sql-quote dir) " "
-               "OR (LENGTH(" (roster--opencode-sql-quote dir) ") > LENGTH(worktree) "
-               "AND SUBSTR(" (roster--opencode-sql-quote dir) ", 1, LENGTH(worktree) + 1) = worktree || '/') "
-               "ORDER BY LENGTH(worktree) DESC;")))
-    (roster--opencode-query-projects sql)))
+(defun roster--opencode-session-path (session)
+  "Return native API path for OpenCode SESSION."
+  (format "/session/%s"
+          (url-hexify-string (roster--session-id session))))
 
-(defun roster--opencode-global-project ()
-  "Return the OpenCode global project plist."
-  (let* ((sql (concat
-               "SELECT id, worktree, COALESCE(name, '') FROM project "
-               "WHERE id = 'global' LIMIT 1;")))
-    (car (roster--opencode-query-projects sql))))
+(defun roster--opencode-session-directory-query (session)
+  "Return native API directory query for OpenCode SESSION."
+  `(("directory" . ,(roster--session-directory session))))
 
-(defun roster--opencode-project-label (project)
-  "Return a completion label for PROJECT."
-  (let ((worktree (plist-get project :worktree))
-        (name (plist-get project :name)))
-    (if name
-        (format "%s (%s)" worktree name)
-      worktree)))
-
-(defun roster--opencode-resolve-target-project (directory)
-  "Return the best OpenCode project for DIRECTORY.
-Prefer an exact worktree match, otherwise fall back to a parent project whose
-worktree contains DIRECTORY, and finally the global project."
-  (or (roster--opencode-project-for-directory directory)
-      (car (roster--opencode-projects-containing-directory directory))
-      (roster--opencode-global-project)))
-
-(defun roster--opencode-session-with-project-worktree (session-id)
-  "Return session plist for SESSION-ID including its project worktree."
-  (when-let ((row (car (roster--opencode-sqlite-rows
-                        (concat
-                         "SELECT s.id, s.title, s.directory, s.project_id, "
-                         "COALESCE(p.worktree, ''), COALESCE(s.time_archived, '') "
-                         "FROM session s LEFT JOIN project p ON p.id = s.project_id "
-                         "WHERE s.id = " (roster--opencode-sql-quote session-id) " LIMIT 1;")))))
-    (pcase-let ((`(,id ,title ,directory ,project-id ,project-worktree ,archived-raw) row))
-      (list :id id
-            :title (if (string-empty-p title) roster--untitled title)
-            :directory (expand-file-name directory)
-            :project-id project-id
-            :time-archived (unless (string-empty-p archived-raw)
-                             (string-to-number archived-raw))
-            :project-worktree (unless (string-empty-p project-worktree)
-                                (expand-file-name project-worktree))))))
-
-(defun roster--opencode-move-session-directory (session-id directory project-id)
-  "Move SESSION-ID to DIRECTORY under PROJECT-ID."
-  (let ((dir (directory-file-name (expand-file-name directory))))
-    (roster--opencode-sqlite-exec-change-p
-     (concat "UPDATE session SET "
-             "directory = " (roster--opencode-sql-quote dir) ", "
-             "project_id = " (roster--opencode-sql-quote project-id) ", "
-             "time_updated = CAST(unixepoch('subsec') * 1000 AS INTEGER) "
-             "WHERE id = " (roster--opencode-sql-quote session-id) ";"))))
-
-(defun roster--opencode-set-session-title (session-id title)
-  "Set SESSION-ID title to TITLE.
-Return non-nil when one row was updated."
-  (roster--opencode-sqlite-exec-change-p
-   (concat "UPDATE session SET title = " (roster--opencode-sql-quote title)
-           " WHERE id = " (roster--opencode-sql-quote session-id) ";")))
-
-(defun roster--opencode-set-session-archived (session-id archived)
-  "Set SESSION-ID archived state to ARCHIVED.
-Return non-nil when one row was updated."
-  (let ((value (if archived
-                   (number-to-string (floor (* roster--ms-per-second (float-time (current-time)))))
-                 "NULL")))
-    (roster--opencode-sqlite-exec-change-p
-     (concat "UPDATE session SET time_archived = " value
-             " WHERE id = " (roster--opencode-sql-quote session-id) ";"))))
+(defun roster--opencode-update-session (session body)
+  "Update OpenCode SESSION with BODY through the native API."
+  (roster--opencode-api-body
+   "PATCH" (roster--opencode-session-path session)
+   (roster--opencode-session-directory-query session) body))
 
 (defun roster--opencode-delete-session (session)
-  "Delete OpenCode SESSION via the official CLI workflow."
-  (let* ((session-id (plist-get session :id))
-         (directory (plist-get session :directory))
-         (command (format "%s session delete %s"
-                          roster-opencode-command
-                          (shell-quote-argument session-id))))
-    (roster--run-command directory command)))
+  "Delete OpenCode SESSION through the native API."
+  (roster--opencode-api-body
+   "DELETE" (roster--opencode-session-path session)
+   (roster--opencode-session-directory-query session)))
+
+(defun roster--opencode-rename-session (session new-title)
+  "Rename OpenCode SESSION to NEW-TITLE through the native API."
+  (let ((updated (roster--opencode-update-session
+                  session `(("title" . ,new-title)))))
+    (unless (equal (plist-get updated :title) new-title)
+      (user-error "Session %s failed title verification"
+                  (roster--session-id session)))))
+
+(defun roster--opencode-unarchive-compat (session)
+  "Unarchive OpenCode SESSION through its deprecated SQLite compatibility path.
+OpenCode 1.18's native PATCH endpoint ignores a missing archive time and rejects
+JSON null, so it cannot express `Session.setArchived(..., undefined)'.  Keep
+this small fallback isolated until the server exposes native unarchive."
+  (unless (and (require 'sqlite nil t) (sqlite-available-p))
+    (user-error "This OpenCode version has no native unarchive API"))
+  (unless (file-readable-p roster-opencode-db-path)
+    (user-error "OpenCode database not found: %s" roster-opencode-db-path))
+  (let ((db (sqlite-open roster-opencode-db-path)))
+    (unwind-protect
+        (unless (= 1 (sqlite-execute
+                      db "UPDATE session SET time_archived = NULL WHERE id = ?"
+                      (vector (roster--session-id session))))
+          (user-error "No session updated for id %s"
+                      (roster--session-id session)))
+      (sqlite-close db))))
+
+(defun roster--opencode-archive-session (session archived)
+  "Set OpenCode SESSION archive state to ARCHIVED."
+  (if archived
+      (let* ((timestamp (floor (* roster--ms-per-second
+                                  (float-time (current-time)))))
+             (updated
+              (roster--opencode-update-session
+               session `(("time" . (("archived" . ,timestamp)))))))
+        (unless (numberp (plist-get (plist-get updated :time) :archived))
+          (user-error "Session %s failed archive verification"
+                      (roster--session-id session))))
+    (roster--opencode-unarchive-compat session)))
+
+(defun roster--opencode-move-session (session)
+  "Interactively move OpenCode SESSION through its native control-plane API."
+  (let* ((old-dir (roster--session-directory session))
+         (new-dir (directory-file-name
+                   (expand-file-name
+                    (read-directory-name
+                     (format "New directory (current: %s): " old-dir)
+                     old-dir nil t)))))
+    (cond
+     ((string= old-dir new-dir)
+      (message "Session %s already points to %s"
+               (roster--session-id session) new-dir)
+      nil)
+     ((not (yes-or-no-p
+            (format "Move session %s from %s to %s? "
+                    (roster--session-id session) old-dir new-dir)))
+      nil)
+     (t
+      (roster--opencode-api-body
+       "POST" "/experimental/control-plane/move-session" nil
+       `(("sessionID" . ,(roster--session-id session))
+         ("destination" . (("directory" . ,new-dir)))
+         ("moveChanges" . :json-false)))
+      (message "Moved session %s to %s" (roster--session-id session) new-dir)
+      t))))
 
 (defun roster--opencode-resume-command (session)
   "Return the shell command used to resume OpenCode SESSION."
@@ -206,80 +312,6 @@ Return non-nil when one row was updated."
 (defun roster--opencode-new-command ()
   "Return the shell command used to start an OpenCode session."
   roster-opencode-command)
-
-(defun roster--opencode-rename-session (session new-title)
-  "Rename OpenCode SESSION to NEW-TITLE and verify the update."
-  (let ((session-id (roster--session-id session)))
-    (unless (roster--opencode-set-session-title session-id new-title)
-      (user-error "No session updated for id %s" session-id))
-    (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-      (unless (and updated (string= (plist-get updated :title) new-title))
-        (user-error "Session %s failed title verification" session-id)))))
-
-(defun roster--opencode-archive-session (session archived)
-  "Set OpenCode SESSION archived state to ARCHIVED and verify the update."
-  (let ((session-id (roster--session-id session)))
-    (unless (roster--opencode-set-session-archived session-id archived)
-      (user-error "No session updated for id %s" session-id))
-    (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-      (unless (and updated (eq (roster--session-archived-p updated) archived))
-        (user-error "Session %s failed archive verification" session-id)))))
-
-(defun roster--opencode-verify-moved-session
-    (session-id directory project-id project-worktree)
-  "Signal when SESSION-ID does not match DIRECTORY and PROJECT-ID.
-PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
-  (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-    (unless updated
-      (user-error "Updated session %s could not be reloaded" session-id))
-    (unless (and (string= (plist-get updated :directory) directory)
-                 (string= (plist-get updated :project-id) project-id)
-                 (string= (or (plist-get updated :project-worktree) "")
-                          project-worktree))
-      (user-error "Session %s failed post-update consistency checks" session-id))))
-
-(defun roster--opencode-target-project-for-directory (directory)
-  "Return the resolved OpenCode project for DIRECTORY or signal an error."
-  (or (roster--opencode-resolve-target-project directory)
-      (user-error
-       (concat
-        "No OpenCode project matches %s. OpenCode only stays consistent when "
-        "the target directory already exists as a project worktree.")
-       directory)))
-
-(defun roster--opencode-move-session (session)
-  "Interactively move OpenCode SESSION to another known project directory."
-  (let* ((session-id (roster--session-id session))
-         (old-dir (roster--session-directory session))
-         (old-project-id (plist-get session :project-id))
-         (new-dir (directory-file-name
-                   (expand-file-name
-                    (read-directory-name
-                     (format "New directory (current: %s): " old-dir)
-                     old-dir nil t)))))
-    (unless (file-directory-p new-dir)
-      (user-error "Directory does not exist: %s" new-dir))
-    (let* ((target-project (roster--opencode-target-project-for-directory new-dir))
-           (new-project-id (plist-get target-project :id)))
-      (cond
-       ((and (string= old-dir new-dir)
-             (string= old-project-id new-project-id))
-        (message "Session %s already points to %s" session-id new-dir)
-        nil)
-       ((not (yes-or-no-p
-              (format "Move session %s from %s to %s? "
-                      session-id old-dir new-dir)))
-        nil)
-       (t
-        (unless (roster--opencode-move-session-directory
-                 session-id new-dir new-project-id)
-          (user-error "No session updated for id %s" session-id))
-        (roster--opencode-verify-moved-session
-         session-id new-dir new-project-id (plist-get target-project :worktree))
-        (message
-         "Moved session %s to %s. Restart active OpenCode views if state is stale."
-         session-id new-dir)
-        t)))))
 
 (roster-register-backend
  (roster-backend-create
@@ -292,7 +324,8 @@ PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
   :rename #'roster--opencode-rename-session
   :archive #'roster--opencode-archive-session
   :delete #'roster--opencode-delete-session
-  :move #'roster--opencode-move-session))
+  :move #'roster--opencode-move-session
+  :batch #'roster--opencode-call-with-server))
 
 (provide 'roster-opencode)
 

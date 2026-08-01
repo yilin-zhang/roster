@@ -61,7 +61,7 @@
 (ert-deftest roster-claude-title-prefers-custom-title-to-ai-title ()
   "An explicit /rename remains authoritative over generated titles."
   (let ((meta '(:custom-title "Chosen title" :ai-title "Generated title"
-			      :slug "old-slug" :title-candidate "First prompt")))
+			                  :slug "old-slug" :title-candidate "First prompt")))
     (should (equal (roster--claude-title meta nil) "Chosen title"))))
 
 (ert-deftest roster-claude-archive-preserves-sidecar-title ()
@@ -77,6 +77,49 @@
             (should (numberp (cdr (assoc "time_archived" sidecar))))))
       (delete-directory root t))))
 
+(ert-deftest roster-claude-load-sessions-prefers-native-sdk ()
+  (let ((roster-claude-use-agent-sdk 'auto))
+    (cl-letf (((symbol-function 'roster--claude-sdk-call)
+               (lambda (&rest _)
+                 '(:available t
+                              :sessions ((:id "cc-1" :title "SDK title"
+                                              :directory "/tmp/sdk" :time_updated 42)))))
+              ((symbol-function 'roster--claude-load-sessions-from-transcripts)
+               (lambda (&rest _) (error "compatibility fallback used"))))
+      (let ((session (car (roster--claude-load-sessions))))
+        (should (equal (plist-get session :id) "cc-1"))
+        (should (equal (plist-get session :title) "SDK title"))
+        (should (equal (plist-get session :directory) "/tmp/sdk"))
+        (should (= (plist-get session :time-updated) 42))))))
+
+(ert-deftest roster-claude-load-sessions-falls-back-without-sdk ()
+  (let ((roster-claude-use-agent-sdk 'auto)
+        (expected '((:id "cc-1" :tool claude))))
+    (cl-letf (((symbol-function 'roster--claude-sdk-call) (lambda (&rest _) nil))
+              ((symbol-function 'roster--claude-load-sessions-from-transcripts)
+               (lambda (_include-archived) expected)))
+      (should (equal (roster--claude-load-sessions t) expected)))))
+
+(ert-deftest roster-claude-sdk-auto-falls-back-without-python ()
+  (let ((roster-claude-use-agent-sdk 'auto))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _) (signal 'file-missing '("python3")))))
+      (should-not (roster--claude-sdk-call "list")))))
+
+(ert-deftest roster-claude-rename-prefers-native-sdk ()
+  (let ((roster-claude-use-agent-sdk 'auto)
+        (session '(:id "cc-1" :directory "/tmp/sdk" :tool claude))
+        call cleared)
+    (cl-letf (((symbol-function 'roster--claude-sdk-call)
+               (lambda (&rest arguments) (setq call arguments) '(:available t)))
+              ((symbol-function 'roster--claude-clear-legacy-title)
+               (lambda (session-id) (setq cleared session-id)))
+              ((symbol-function 'roster--claude-append-custom-title)
+               (lambda (&rest _) (error "compatibility fallback used"))))
+      (should (roster--claude-rename-session session "New title"))
+      (should (equal call '("rename" "cc-1" "New title" "/tmp/sdk")))
+      (should (equal cleared "cc-1")))))
+
 (ert-deftest roster-load-sessions-merges-opencode-and-claude ()
   (let* ((roster-enabled-tools '(opencode claude))
          (root (make-temp-file "roster-claude-root-" t))
@@ -84,7 +127,8 @@
          (projects-dir (expand-file-name "projects" root))
          (encoded-dir "-tmp-proj")
          (session-id "claude-session-1")
-         (session-dir (expand-file-name encoded-dir projects-dir)))
+         (session-dir (expand-file-name encoded-dir projects-dir))
+         (roster-claude-use-agent-sdk nil))
     (unwind-protect
         (progn
           (make-directory session-dir t)
@@ -92,8 +136,11 @@
             (insert (concat
                      "{\"slug\":\"claude-slug\",\"type\":\"user\",\"cwd\":\"/tmp/claude\","
                      "\"message\":{\"content\":\"Claude title\"}}\n")))
-          (roster-test--with-sqlite-rows
-              '(("oc_1" "OpenCode Title" "/tmp/opencode" "proj_1" "1700000000000" ""))
+          (cl-letf (((symbol-function 'roster--opencode-load-sessions)
+                     (lambda (&optional _)
+                       '((:id "oc_1" :title "OpenCode Title"
+                              :directory "/tmp/opencode" :project-id "proj_1"
+                              :time-updated 1700000000000 :tool opencode)))))
             (let ((sessions (roster--load-sessions)))
               (should (= (length sessions) 2))
               (should (equal (mapcar (lambda (s) (plist-get s :tool)) sessions)

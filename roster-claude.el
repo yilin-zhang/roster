@@ -26,11 +26,59 @@
   :type 'string
   :group 'roster)
 
+(defcustom roster-claude-python-command "python3"
+  "Python executable used for the optional Claude Agent SDK bridge."
+  :type 'string
+  :group 'roster)
+
+(defcustom roster-claude-use-agent-sdk 'auto
+  "Whether to use Claude Agent SDK's native session management API.
+When `auto', use it when `claude_agent_sdk' is installed and otherwise use
+the documented transcript compatibility implementation.  Non-nil requires
+the SDK and nil always uses the compatibility implementation."
+  :type '(choice (const :tag "Use when available" auto)
+                 (const :tag "Require SDK" t)
+                 (const :tag "Use transcript compatibility" nil))
+  :group 'roster)
+
+(defconst roster--claude-sdk-script
+  (expand-file-name "scripts/roster-claude-sdk.py"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Path to roster's Claude Agent SDK bridge.")
+
+(defun roster--claude-sdk-call (&rest arguments)
+  "Call the Claude Agent SDK bridge with ARGUMENTS and return its result."
+  (condition-case err
+      (with-temp-buffer
+        (let ((process-environment
+               (cons (concat "CLAUDE_CONFIG_DIR=" roster-claude-dir)
+                     process-environment))
+              (status (apply #'call-process roster-claude-python-command nil t nil
+                             roster--claude-sdk-script arguments)))
+          (let ((result (roster--read-json (string-trim (buffer-string)))))
+            (cond
+             ((not (plist-get result :available))
+              (when (eq roster-claude-use-agent-sdk t)
+                (user-error "claude-agent-sdk is not installed"))
+              nil)
+             ((not (eq status 0))
+              (user-error "Claude Agent SDK error: %s"
+                          (or (plist-get result :error) "unknown error")))
+             (t result)))))
+    (file-missing
+     (when (eq roster-claude-use-agent-sdk t)
+       (user-error "Cannot run Claude Agent SDK bridge: %s"
+                   (error-message-string err)))
+     nil)))
+
 (defun roster--claude-jsonl-files (projects-dir)
   "Return `(ENCODED-DIR . PATH)' pairs for Claude JSONL files in PROJECTS-DIR.
 Claude Code stores each project under a URL-encoded form of its absolute path
 \(e.g. \"-Users-alice-myproject\"); ENCODED-DIR is that raw directory name,
 used later as the key for sidecar files."
+  ;; Compatibility fallback: Claude Agent SDK is a separate optional install,
+  ;; so roster retains support for Claude's documented transcript location.
+  ;; Remove this parser only if the SDK ships with the Claude Code CLI itself.
   (let (result)
     (dolist (encoded-dir (directory-files projects-dir nil "^[^.]"))
       (let ((dir-path (expand-file-name encoded-dir projects-dir)))
@@ -75,6 +123,14 @@ command does internally."
   "Write roster sidecar JSON for Claude Code SESSION-ID.
 TITLE and TIME-ARCHIVED are stored as sidecar fields; either may be nil."
   (roster--write-sidecar (roster--claude-sidecar-path session-id) title time-archived))
+
+(defun roster--claude-clear-legacy-title (session-id)
+  "Remove deprecated roster title metadata for Claude SESSION-ID.
+Preserve roster's archive state, which Claude has no native equivalent for."
+  (let* ((sidecar (roster--claude-read-sidecar session-id))
+         (time-archived (cdr (assoc "time_archived" sidecar))))
+    (when sidecar
+      (roster--claude-write-sidecar session-id nil time-archived))))
 
 (defun roster--claude-update-meta-from-object (obj slug cwd title-candidate)
   "Update Claude metadata from OBJ.
@@ -160,7 +216,8 @@ so the caller can pattern-match the result and rebind all three at once."
               :time-updated (plist-get meta :time-updated)
               :time-archived time-archived
               :tool 'claude
-              :encoded-dir encoded-dir)))))
+              :encoded-dir encoded-dir
+              :file-path path)))))
 
 (defun roster--claude-parse-jsonl (path)
   "Return metadata plist from a Claude Code JSONL file at PATH.
@@ -196,8 +253,9 @@ Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
                 :time-updated time-updated)))
     (error nil)))
 
-(defun roster--claude-load-sessions (&optional include-archived)
-  "Return Claude Code sessions, optionally INCLUDE-ARCHIVED sessions."
+(defun roster--claude-load-sessions-from-transcripts (&optional include-archived)
+  "Return Claude sessions from documented transcripts.
+INCLUDE-ARCHIVED controls roster's sidecar archive metadata."
   (let ((projects-dir (roster--claude-projects-dir)))
     (when (file-directory-p projects-dir)
       (let ((sessions
@@ -208,25 +266,74 @@ Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
                            (roster--claude-jsonl-files projects-dir)))))
         (if include-archived sessions (roster--active-sessions sessions))))))
 
+(defun roster--claude-session-from-sdk (value)
+  "Return unified Claude session parsed from SDK bridge VALUE."
+  (let* ((session-id (plist-get value :id))
+         (sidecar (roster--claude-read-sidecar session-id))
+         (time-archived (cdr (assoc "time_archived" sidecar))))
+    (list :id session-id
+          :title (or (cdr (assoc "title" sidecar))
+                     (plist-get value :title)
+                     roster--untitled)
+          :directory (expand-file-name (or (plist-get value :directory) "~"))
+          :project-id nil
+          :time-updated (or (plist-get value :time_updated) 0)
+          :time-archived (and (numberp time-archived) time-archived)
+          :tool 'claude)))
+
+(defun roster--claude-load-sessions (&optional include-archived)
+  "Return Claude Code sessions, optionally INCLUDE-ARCHIVED sessions."
+  (let* ((sdk-result (when roster-claude-use-agent-sdk
+                       (roster--claude-sdk-call "list")))
+         (sessions
+          (if sdk-result
+              (mapcar #'roster--claude-session-from-sdk
+                      (plist-get sdk-result :sessions))
+            (roster--claude-load-sessions-from-transcripts t))))
+    (if include-archived sessions (roster--active-sessions sessions))))
+
+(defun roster--claude-find-transcript (session-id)
+  "Return transcript path for Claude SESSION-ID, or nil."
+  (let ((projects-dir (roster--claude-projects-dir)))
+    (when (file-directory-p projects-dir)
+      (car (directory-files-recursively
+            projects-dir
+            (concat "\\(?:^\\|/\\)" (regexp-quote session-id) "\\.jsonl\\'"))))))
+
 (defun roster--claude-delete-session (session)
   "Delete a Claude Code SESSION's JSONL file and roster sidecar."
+  ;; Claude exposes no per-session delete API.  Its official docs identify the
+  ;; JSONL transcript as the persisted session, so trashing it is the narrowest
+  ;; native-format-compatible operation.  Revisit when an SDK API is added.
   (let* ((session-id (plist-get session :id))
-         (encoded-dir (plist-get session :encoded-dir))
-         (dir (expand-file-name encoded-dir (roster--claude-projects-dir)))
-         (jsonl (expand-file-name (concat session-id ".jsonl") dir))
+         (jsonl (or (plist-get session :file-path)
+                    (roster--claude-find-transcript session-id)))
          (sidecar (roster--claude-sidecar-path session-id)))
-    (when (file-exists-p jsonl)
+    (when (and jsonl (file-exists-p jsonl))
       (move-file-to-trash jsonl))
     (when (file-exists-p sidecar)
       (delete-file sidecar))))
 
 (defun roster--claude-rename-session (session new-title)
   "Rename Claude Code SESSION to NEW-TITLE."
-  (roster--claude-append-custom-title
-   (plist-get session :encoded-dir) (roster--session-id session) new-title))
+  (let ((session-id (roster--session-id session)))
+    (if (and roster-claude-use-agent-sdk
+             (roster--claude-sdk-call
+              "rename" session-id new-title
+              (roster--session-directory session)))
+        t
+      ;; Compatibility fallback mirrors the native `/rename' record.  It is
+      ;; intentionally isolated for removal once the SDK is a bundled dependency.
+      (roster--claude-append-custom-title
+       (plist-get session :encoded-dir) session-id new-title))
+    (roster--claude-clear-legacy-title session-id)
+    t))
 
 (defun roster--claude-do-archive (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED without prompting."
+  ;; Local Claude CLI sessions have no archive API.  Archive is therefore a
+  ;; roster-only view preference, kept in a sidecar rather than corrupting the
+  ;; SDK's single user-controlled tag field.
   (let* ((session-id (plist-get session :id))
          (sidecar (roster--claude-read-sidecar session-id))
          (new-archived (when archived

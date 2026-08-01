@@ -14,6 +14,10 @@ other child sessions do not clutter the list.
 - At least one supported coding agent installed and configured
 - macOS when using the built-in Ghostty or iTerm launchers
 
+Claude's official Agent SDK is optional.  When its Python package is available,
+Roster uses `list_sessions` and `rename_session` automatically; otherwise it
+falls back to Claude's documented local transcript format.
+
 ## Installation
 
 Clone this repository somewhere on your Emacs `load-path`, then configure it
@@ -80,6 +84,13 @@ agent executable names and data locations.
 | Claude Code | `CC` | Yes    | Yes    | Yes     | Yes    | No             |
 | Codex       | `CX` | Yes    | Yes    | Yes     | Yes    | No             |
 | pi          | `PI` | Yes    | Yes    | Yes     | Yes    | No             |
+
+Roster prefers each tool's public management surface.  Codex uses app-server;
+OpenCode uses its local HTTP server; Claude uses Agent SDK when installed; and
+pi follows its published `SessionManager` file contract.  Archive remains
+Roster-only for Claude and pi because neither tool exposes that concept.
+OpenCode 1.18 can archive but cannot unarchive over HTTP, so only that operation
+temporarily retains an isolated SQLite compatibility path.
 
 ## Development
 
