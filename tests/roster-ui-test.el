@@ -20,8 +20,8 @@
                (lambda (_project) "/repo/project/")))
       (let ((default-directory "/repo/project/subdir/"))
         (should (equal (mapcar (lambda (session) (plist-get session :id))
-			                   (roster--project-scoped-sessions sessions))
-		               '("a" "b")))))))
+                               (roster--project-scoped-sessions sessions))
+                       '("a" "b")))))))
 
 (ert-deftest roster-refresh-hides-archived-when-disabled ()
   (with-temp-buffer
@@ -39,11 +39,11 @@
 
 (ert-deftest roster-entry-includes-derived-columns ()
   (let* ((session '(:id "ses_1"
-			            :title "Decklet Dev"
-			            :directory "/tmp/decklet"
-			            :tool opencode
-			            :time-updated 1700000000000
-			            :time-archived 1700000005000))
+                        :title "Decklet Dev"
+                        :directory "/tmp/decklet"
+                        :tool opencode
+                        :time-updated 1700000000000
+                        :time-archived 1700000005000))
          (entry (roster--entry session))
          (columns (cadr entry)))
     (should (equal (car entry) '(opencode . "ses_1")))
@@ -56,30 +56,30 @@
 
 (ert-deftest roster-entry-shows-claude-tag ()
   (let* ((session '(:id "cc_1"
-			            :title "My Claude Session"
-			            :directory "/tmp/proj"
-			            :time-updated 1700000000000
-			            :tool claude))
+                        :title "My Claude Session"
+                        :directory "/tmp/proj"
+                        :time-updated 1700000000000
+                        :tool claude))
          (columns (cadr (roster--entry session))))
     (should (equal (aref columns 1) "CC"))
     (should (equal (aref columns 2) "ACTIVE"))))
 
 (ert-deftest roster-entry-shows-codex-tag ()
   (let* ((session '(:id "cx_1"
-			            :title "My Codex Session"
-			            :directory "/tmp/proj"
-			            :time-updated 1700000000000
-			            :tool codex))
+                        :title "My Codex Session"
+                        :directory "/tmp/proj"
+                        :time-updated 1700000000000
+                        :tool codex))
          (columns (cadr (roster--entry session))))
     (should (equal (aref columns 1) "CX"))
     (should (equal (aref columns 2) "ACTIVE"))))
 
 (ert-deftest roster-entry-shows-pi-tag ()
   (let* ((session '(:id "pi_1"
-			            :title "My pi Session"
-			            :directory "/tmp/proj"
-			            :time-updated 1700000000000
-			            :tool pi))
+                        :title "My pi Session"
+                        :directory "/tmp/proj"
+                        :time-updated 1700000000000
+                        :tool pi))
          (columns (cadr (roster--entry session))))
     (should (equal (aref columns 1) "PI"))
     (should (equal (aref columns 2) "ACTIVE"))))
@@ -174,7 +174,7 @@ not a buffer line)."
 (ert-deftest roster-session-at-point-distinguishes-tools-with-the-same-id ()
   (roster-test--with-list-buffer
       '((:id "same" :title "Claude" :directory "/c" :time-updated 2000 :tool claude)
-	    (:id "same" :title "Codex" :directory "/x" :time-updated 1000 :tool codex))
+        (:id "same" :title "Codex" :directory "/x" :time-updated 1000 :tool codex))
     (should (eq (plist-get (roster--session-at-point) :tool) 'claude))
     (forward-line 1)
     (should (eq (plist-get (roster--session-at-point) :tool) 'codex))))
@@ -198,7 +198,7 @@ not a buffer line)."
 (ert-deftest roster--marked-keys-returns-marked ()
   (roster-test--with-list-buffer
       '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode)
-	    (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
+        (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
     (puthash '(opencode . "s1") t roster--marked)
     (puthash '(opencode . "s2") t roster--marked)
     (should (equal (sort (roster--marked-keys)
@@ -226,7 +226,7 @@ not a buffer line)."
 (ert-deftest roster-unmark-all-clears-all ()
   (roster-test--with-list-buffer
       '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode)
-	    (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
+        (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
     (puthash '(opencode . "s1") t roster--marked)
     (puthash '(opencode . "s2") t roster--marked)
     (roster-unmark-all)
@@ -236,8 +236,8 @@ not a buffer line)."
   "When two candidates are equidistant, prefer the one on a following line."
   (roster-test--with-list-buffer
       '((:id "s1" :title "A" :directory "/a" :time-updated 3000 :tool opencode)
-	    (:id "s2" :title "B" :directory "/b" :time-updated 2000 :tool opencode)
-	    (:id "s3" :title "C" :directory "/c" :time-updated 1000 :tool opencode))
+        (:id "s2" :title "B" :directory "/b" :time-updated 2000 :tool opencode)
+        (:id "s3" :title "C" :directory "/c" :time-updated 1000 :tool opencode))
     ;; Move to the middle row: sessions are sorted newest-first, so
     ;; s1 is line 1, s2 is line 2, s3 is line 3.
     (forward-line 1)
@@ -249,34 +249,34 @@ not a buffer line)."
 (ert-deftest roster-delete-calls-do-delete ()
   (let (deleted)
     (roster-test--with-list-buffer
-	    '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
+        '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
                :encoded-dir "-a")
-	      (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool claude
+          (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool claude
                :encoded-dir "-b"))
       (puthash '(claude . "s1") t roster--marked)
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
-		        ((symbol-function 'roster--do-delete-session)
+                ((symbol-function 'roster--do-delete-session)
                  (lambda (s) (push (plist-get s :id) deleted)))
-		        ((symbol-function 'revert-buffer) #'ignore)
-		        ((symbol-function 'recenter) #'ignore))
-	    (roster-delete)
-	    (should (equal deleted '("s1")))
-	    (should (zerop (hash-table-count roster--marked)))))))
+                ((symbol-function 'revert-buffer) #'ignore)
+                ((symbol-function 'recenter) #'ignore))
+        (roster-delete)
+        (should (equal deleted '("s1")))
+        (should (zerop (hash-table-count roster--marked)))))))
 
 (ert-deftest roster-archive-calls-do-archive ()
   (let (archived-calls)
     (roster-test--with-list-buffer
-	    '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
+        '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
                :encoded-dir "-a"))
       (puthash '(claude . "s1") t roster--marked)
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
-		        ((symbol-function 'roster--do-archive-session)
+                ((symbol-function 'roster--do-archive-session)
                  (lambda (s a) (push (cons (plist-get s :id) a) archived-calls)))
-		        ((symbol-function 'revert-buffer) #'ignore))
-	    (roster-archive)
-	    ;; s1 is active (no :time-archived), so it should be archived (t)
-	    (should (equal archived-calls '(("s1" . t))))
-	    (should (zerop (hash-table-count roster--marked)))))))
+                ((symbol-function 'revert-buffer) #'ignore))
+        (roster-archive)
+        ;; s1 is active (no :time-archived), so it should be archived (t)
+        (should (equal archived-calls '(("s1" . t))))
+        (should (zerop (hash-table-count roster--marked)))))))
 
 ;;; Utilities
 
@@ -290,7 +290,7 @@ not a buffer line)."
                  0)))
       (should (equal (roster--run-command "/tmp/roster-does-not-exist" "true") "ok"))
       (should (equal captured-default-directory
-		             (file-name-as-directory (expand-file-name "~")))))))
+                     (file-name-as-directory (expand-file-name "~")))))))
 
 (provide 'roster-ui-test)
 

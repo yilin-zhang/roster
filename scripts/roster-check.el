@@ -38,6 +38,10 @@ When ROSTER_FIX_INDENT is set, rewrite files instead of failing."
         (insert-file-contents file)
         (let ((original (buffer-string)))
           (emacs-lisp-mode)
+          ;; Keep formatting independent of user and platform defaults.
+          (setq-local indent-tabs-mode nil
+                      tab-width 8)
+          (untabify (point-min) (point-max))
           (indent-region (point-min) (point-max))
           (unless (string-equal original (buffer-string))
             (if (getenv "ROSTER_FIX_INDENT")
