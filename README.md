@@ -15,8 +15,7 @@ without leaving your editor.
 (use-package roster
   :ensure nil
   :load-path "~/.emacs.d/site-lisp/roster/"
-  :commands (roster-list-sessions
-             roster-list-project-sessions)
+  :commands (roster roster-project)
   :custom
   ;; Omit `roster-enabled-tools' to enable all supported agents automatically.
   (roster-enabled-tools '(opencode claude codex pi))
@@ -35,8 +34,8 @@ available. If you prefer iTerm:
 
 Two entry points open the session list:
 
-- `roster-list-sessions` — full session list
-- `roster-list-project-sessions` — sessions filtered to the current project
+- `roster` — full session list
+- `roster-project` — sessions filtered to the current project
 
 From the list buffer:
 
@@ -58,18 +57,25 @@ From the list buffer:
 
 Directory moves (`R`) are only supported for OpenCode sessions.
 
+## Structure
+
+- `roster-core.el` — shared data model, customization, and terminal helpers
+- `roster-{opencode,claude,codex,pi}.el` — isolated session backends
+- `roster.el` — unified list UI, command dispatch, and public entry points
+- `tests/roster-*-test.el` — backend- and UI-specific ERT suites
+
 ## Notes
 
 - OpenCode sessions are read from and written to the OpenCode SQLite database
   directly.
 - Claude Code sessions are read from JSONL files under `~/.claude/projects/`.
   Since Claude Code's database is not writable by third parties, custom titles
-  and archive state are stored in small `*.roster.json` sidecar files next to
-  each session's JSONL file.
-- Codex sessions are read from JSONL files under `~/.codex/sessions/YYYY/MM/DD/`.
-  Archived sessions live in `~/.codex/archived_sessions/`; archiving and
-  unarchiving moves files between the two directories. Custom titles are stored
-  in `~/.codex/roster/UUID.roster.json` sidecar files.
+  and archive state are stored in small `~/.claude/roster/*.roster.json`
+  sidecar files.
+- Codex sessions are listed, renamed, archived, unarchived, and deleted through
+  the official app-server API. Legacy roster sidecars remain readable only for
+  migration. Codex filters subagent and guardian threads from its default
+  interactive listing.
 - pi sessions are read from JSONL files under `~/.pi/agent/sessions/`.
   Archived state is stored in `~/.pi/agent/roster/UUID.roster.json` sidecar
   files. Renames append `session_info` entries so pi itself sees the updated
