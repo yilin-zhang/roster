@@ -12,10 +12,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read Emacs version
+        id: emacs-version
+        run: echo "version=$(tr -d '[:space:]' < .emacs-version)" >> "$GITHUB_OUTPUT"
+
       - name: Setup Emacs
         uses: purcell/setup-emacs@master
         with:
-          version: '30.1'
+          version: ${{ steps.emacs-version.outputs.version }}
 
       - name: Run checks (parens, indent, byte-compile, checkdoc, package-lint, tests)
         run: |

@@ -60,8 +60,10 @@
 
 (ert-deftest roster-claude-title-prefers-custom-title-to-ai-title ()
   "An explicit /rename remains authoritative over generated titles."
-  (let ((meta '(:custom-title "Chosen title" :ai-title "Generated title"
-			                  :slug "old-slug" :title-candidate "First prompt")))
+  (let ((meta (list :custom-title "Chosen title"
+                    :ai-title "Generated title"
+                    :slug "old-slug"
+                    :title-candidate "First prompt")))
     (should (equal (roster--claude-title meta nil) "Chosen title"))))
 
 (ert-deftest roster-claude-archive-preserves-sidecar-title ()
@@ -78,12 +80,16 @@
       (delete-directory root t))))
 
 (ert-deftest roster-claude-load-sessions-prefers-native-sdk ()
-  (let ((roster-claude-use-agent-sdk 'auto))
+  (let ((roster-claude-use-agent-sdk 'auto)
+        (sdk-result
+         (list :available t
+               :sessions
+               (list (list :id "cc-1"
+                           :title "SDK title"
+                           :directory "/tmp/sdk"
+                           :time_updated 42)))))
     (cl-letf (((symbol-function 'roster--claude-sdk-call)
-               (lambda (&rest _)
-                 '(:available t
-                              :sessions ((:id "cc-1" :title "SDK title"
-                                              :directory "/tmp/sdk" :time_updated 42)))))
+               (lambda (&rest _) sdk-result))
               ((symbol-function 'roster--claude-load-sessions-from-transcripts)
                (lambda (&rest _) (error "compatibility fallback used"))))
       (let ((session (car (roster--claude-load-sessions))))
@@ -128,7 +134,14 @@
          (encoded-dir "-tmp-proj")
          (session-id "claude-session-1")
          (session-dir (expand-file-name encoded-dir projects-dir))
-         (roster-claude-use-agent-sdk nil))
+         (roster-claude-use-agent-sdk nil)
+         (opencode-session
+          (list :id "oc_1"
+                :title "OpenCode Title"
+                :directory "/tmp/opencode"
+                :project-id "proj_1"
+                :time-updated 1700000000000
+                :tool 'opencode)))
     (unwind-protect
         (progn
           (make-directory session-dir t)
@@ -137,10 +150,7 @@
                      "{\"slug\":\"claude-slug\",\"type\":\"user\",\"cwd\":\"/tmp/claude\","
                      "\"message\":{\"content\":\"Claude title\"}}\n")))
           (cl-letf (((symbol-function 'roster--opencode-load-sessions)
-                     (lambda (&optional _)
-                       '((:id "oc_1" :title "OpenCode Title"
-                              :directory "/tmp/opencode" :project-id "proj_1"
-                              :time-updated 1700000000000 :tool opencode)))))
+                     (lambda (&optional _) (list opencode-session))))
             (let ((sessions (roster--load-sessions)))
               (should (= (length sessions) 2))
               (should (equal (mapcar (lambda (s) (plist-get s :tool)) sessions)
