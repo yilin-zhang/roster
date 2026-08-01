@@ -10,6 +10,22 @@
 
 ;;; pi backend
 
+(defface roster-tool-pi-face
+  `((t :foreground ,(face-attribute 'ansi-color-red :foreground)))
+  "Face for the pi tool tag in `roster' lists."
+  :group 'roster)
+
+(defcustom roster-pi-dir
+  (expand-file-name "~/.pi/agent")
+  "Path to the pi configuration directory."
+  :type 'directory
+  :group 'roster)
+
+(defcustom roster-pi-command "pi"
+  "The pi executable name or full path."
+  :type 'string
+  :group 'roster)
+
 (defun roster--pi-sessions-dir ()
   "Return the pi sessions directory."
   (expand-file-name "sessions" roster-pi-dir))
@@ -145,16 +161,9 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
     (when (file-exists-p sidecar)
       (delete-file sidecar))))
 
-(defun roster--pi-rename-session-command (session)
-  "Rename a pi SESSION by appending a `session_info' entry."
-  (let* ((session-id (plist-get session :id))
-         (old-title (roster--session-title session))
-         (new-title (roster--read-session-title session)))
-    (if (string= old-title new-title)
-        (progn (message "Session %s already uses that title" session-id) nil)
-      (roster--pi-append-session-info session new-title)
-      (message "Renamed pi session %s to %s" session-id new-title)
-      t)))
+(defun roster--pi-rename-session (session new-title)
+  "Rename pi SESSION to NEW-TITLE."
+  (roster--pi-append-session-info session new-title))
 
 (defun roster--pi-do-archive (session archived)
   "Set a pi SESSION archived state to ARCHIVED without prompting."
@@ -164,6 +173,27 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
     (roster--pi-write-sidecar
      session-id sidecar-title
      (when archived (floor (* roster--ms-per-second (float-time (current-time))))))))
+
+(defun roster--pi-resume-command (session)
+  "Return the shell command used to resume pi SESSION."
+  (format "%s --session %s" roster-pi-command
+          (shell-quote-argument (plist-get session :file-path))))
+
+(defun roster--pi-new-command ()
+  "Return the shell command used to start a pi session."
+  roster-pi-command)
+
+(roster-register-backend
+ (roster-backend-create
+  :id 'pi
+  :label "PI"
+  :face 'roster-tool-pi-face
+  :load #'roster--pi-load-sessions
+  :resume-command #'roster--pi-resume-command
+  :new-command #'roster--pi-new-command
+  :rename #'roster--pi-rename-session
+  :archive #'roster--pi-do-archive
+  :delete #'roster--pi-delete-session))
 
 (provide 'roster-pi)
 

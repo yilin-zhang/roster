@@ -10,6 +10,22 @@
 
 ;;; Claude Code backend
 
+(defface roster-tool-claude-face
+  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
+  "Face for the Claude Code tool tag in `roster' lists."
+  :group 'roster)
+
+(defcustom roster-claude-dir
+  (expand-file-name "~/.claude")
+  "Path to the Claude Code configuration directory."
+  :type 'directory
+  :group 'roster)
+
+(defcustom roster-claude-command "claude"
+  "Claude Code executable name or full path."
+  :type 'string
+  :group 'roster)
+
 (defun roster--claude-jsonl-files (projects-dir)
   "Return `(ENCODED-DIR . PATH)' pairs for Claude JSONL files in PROJECTS-DIR.
 Claude Code stores each project under a URL-encoded form of its absolute path
@@ -204,18 +220,10 @@ Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
     (when (file-exists-p sidecar)
       (delete-file sidecar))))
 
-(defun roster--claude-rename-session-command (session)
-  "Rename a Claude Code SESSION by appending a custom-title record to its JSONL.
-This is equivalent to /rename inside Claude Code; return non-nil on change."
-  (let* ((session-id (plist-get session :id))
-         (encoded-dir (plist-get session :encoded-dir))
-         (old-title (roster--session-title session))
-         (new-title (roster--read-session-title session)))
-    (if (string= old-title new-title)
-        (progn (message "Session %s already uses that title" session-id) nil)
-      (roster--claude-append-custom-title encoded-dir session-id new-title)
-      (message "Renamed session %s to %s" session-id new-title)
-      t)))
+(defun roster--claude-rename-session (session new-title)
+  "Rename Claude Code SESSION to NEW-TITLE."
+  (roster--claude-append-custom-title
+   (plist-get session :encoded-dir) (roster--session-id session) new-title))
 
 (defun roster--claude-do-archive (session archived)
   "Set a Claude Code SESSION archived state to ARCHIVED without prompting."
@@ -225,6 +233,27 @@ This is equivalent to /rename inside Claude Code; return non-nil on change."
                          (floor (* roster--ms-per-second (float-time (current-time)))))))
     (roster--claude-write-sidecar
      session-id (cdr (assoc "title" sidecar)) new-archived)))
+
+(defun roster--claude-resume-command (session)
+  "Return the shell command used to resume Claude Code SESSION."
+  (format "%s -r %s" roster-claude-command
+          (shell-quote-argument (roster--session-id session))))
+
+(defun roster--claude-new-command ()
+  "Return the shell command used to start a Claude Code session."
+  roster-claude-command)
+
+(roster-register-backend
+ (roster-backend-create
+  :id 'claude
+  :label "CC"
+  :face 'roster-tool-claude-face
+  :load #'roster--claude-load-sessions
+  :resume-command #'roster--claude-resume-command
+  :new-command #'roster--claude-new-command
+  :rename #'roster--claude-rename-session
+  :archive #'roster--claude-do-archive
+  :delete #'roster--claude-delete-session))
 
 (provide 'roster-claude)
 

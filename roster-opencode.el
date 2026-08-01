@@ -11,6 +11,22 @@
 
 ;;; OpenCode backend
 
+(defface roster-tool-opencode-face
+  `((t :foreground ,(face-attribute 'ansi-color-blue :foreground)))
+  "Face for the OpenCode tool tag in `roster' lists."
+  :group 'roster)
+
+(defcustom roster-opencode-db-path
+  (expand-file-name "~/.local/share/opencode/opencode.db")
+  "Path to OpenCode SQLite database."
+  :type 'file
+  :group 'roster)
+
+(defcustom roster-opencode-command "opencode"
+  "OpenCode executable name or full path."
+  :type 'string
+  :group 'roster)
+
 (defun roster--opencode-sql-quote (value)
   "Return SQL single-quoted VALUE with escaped apostrophes."
   (concat "'" (replace-regexp-in-string "'" "''" value t t) "'"))
@@ -181,6 +197,102 @@ Return non-nil when one row was updated."
                           roster-opencode-command
                           (shell-quote-argument session-id))))
     (roster--run-command directory command)))
+
+(defun roster--opencode-resume-command (session)
+  "Return the shell command used to resume OpenCode SESSION."
+  (format "%s -s %s" roster-opencode-command
+          (shell-quote-argument (roster--session-id session))))
+
+(defun roster--opencode-new-command ()
+  "Return the shell command used to start an OpenCode session."
+  roster-opencode-command)
+
+(defun roster--opencode-rename-session (session new-title)
+  "Rename OpenCode SESSION to NEW-TITLE and verify the update."
+  (let ((session-id (roster--session-id session)))
+    (unless (roster--opencode-set-session-title session-id new-title)
+      (user-error "No session updated for id %s" session-id))
+    (let ((updated (roster--opencode-session-with-project-worktree session-id)))
+      (unless (and updated (string= (plist-get updated :title) new-title))
+        (user-error "Session %s failed title verification" session-id)))))
+
+(defun roster--opencode-archive-session (session archived)
+  "Set OpenCode SESSION archived state to ARCHIVED and verify the update."
+  (let ((session-id (roster--session-id session)))
+    (unless (roster--opencode-set-session-archived session-id archived)
+      (user-error "No session updated for id %s" session-id))
+    (let ((updated (roster--opencode-session-with-project-worktree session-id)))
+      (unless (and updated (eq (roster--session-archived-p updated) archived))
+        (user-error "Session %s failed archive verification" session-id)))))
+
+(defun roster--opencode-verify-moved-session
+    (session-id directory project-id project-worktree)
+  "Signal when SESSION-ID does not match DIRECTORY and PROJECT-ID.
+PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
+  (let ((updated (roster--opencode-session-with-project-worktree session-id)))
+    (unless updated
+      (user-error "Updated session %s could not be reloaded" session-id))
+    (unless (and (string= (plist-get updated :directory) directory)
+                 (string= (plist-get updated :project-id) project-id)
+                 (string= (or (plist-get updated :project-worktree) "")
+                          project-worktree))
+      (user-error "Session %s failed post-update consistency checks" session-id))))
+
+(defun roster--opencode-target-project-for-directory (directory)
+  "Return the resolved OpenCode project for DIRECTORY or signal an error."
+  (or (roster--opencode-resolve-target-project directory)
+      (user-error
+       (concat
+        "No OpenCode project matches %s. OpenCode only stays consistent when "
+        "the target directory already exists as a project worktree.")
+       directory)))
+
+(defun roster--opencode-move-session (session)
+  "Interactively move OpenCode SESSION to another known project directory."
+  (let* ((session-id (roster--session-id session))
+         (old-dir (roster--session-directory session))
+         (old-project-id (plist-get session :project-id))
+         (new-dir (directory-file-name
+                   (expand-file-name
+                    (read-directory-name
+                     (format "New directory (current: %s): " old-dir)
+                     old-dir nil t)))))
+    (unless (file-directory-p new-dir)
+      (user-error "Directory does not exist: %s" new-dir))
+    (let* ((target-project (roster--opencode-target-project-for-directory new-dir))
+           (new-project-id (plist-get target-project :id)))
+      (cond
+       ((and (string= old-dir new-dir)
+             (string= old-project-id new-project-id))
+        (message "Session %s already points to %s" session-id new-dir)
+        nil)
+       ((not (yes-or-no-p
+              (format "Move session %s from %s to %s? "
+                      session-id old-dir new-dir)))
+        nil)
+       (t
+        (unless (roster--opencode-move-session-directory
+                 session-id new-dir new-project-id)
+          (user-error "No session updated for id %s" session-id))
+        (roster--opencode-verify-moved-session
+         session-id new-dir new-project-id (plist-get target-project :worktree))
+        (message
+         "Moved session %s to %s. Restart active OpenCode views if state is stale."
+         session-id new-dir)
+        t)))))
+
+(roster-register-backend
+ (roster-backend-create
+  :id 'opencode
+  :label "OC"
+  :face 'roster-tool-opencode-face
+  :load #'roster--opencode-load-sessions
+  :resume-command #'roster--opencode-resume-command
+  :new-command #'roster--opencode-new-command
+  :rename #'roster--opencode-rename-session
+  :archive #'roster--opencode-archive-session
+  :delete #'roster--opencode-delete-session
+  :move #'roster--opencode-move-session))
 
 (provide 'roster-opencode)
 

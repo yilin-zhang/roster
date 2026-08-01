@@ -14,19 +14,8 @@
 ;; tagged "OC" (OpenCode), "CC" (Claude Code), "CX" (Codex), or "PI" (pi).  Supported operations:
 ;;   resume, rename, archive/unarchive, delete, and directory moves (OpenCode only).
 ;;
-;; Storage backends:
-;;   OpenCode  — reads and writes the SQLite database at `roster-opencode-db-path'.
-;;   Claude Code — reads JSONL conversation files under `roster-claude-dir'/projects/.
-;;                 Custom metadata (title, archive state) is kept in .roster.json
-;;                 sidecar files because Claude Code's database is not third-party
-;;                 writable.
-;;   Codex     — lists, renames, archives, and deletes threads through the official
-;;                 app-server API.  Deprecated .roster.json sidecars remain
-;;                 read-only title fallbacks during migration.
-;;   pi        — reads JSONL files under `roster-pi-dir'/sessions/.  Custom metadata
-;;                 (archive state) is kept in .roster.json sidecar files under
-;;                 `roster-pi-dir'/roster/.  Renames append `session_info' entries so
-;;                 pi itself sees the updated display name.
+;; Each backend module owns its storage, commands, mutations, and display metadata.
+;; `roster.el' consumes those capabilities through the registry in `roster-core'.
 ;;
 ;; Requires Emacs 29.1+ for built-in SQLite support (sqlite.el).
 
@@ -42,73 +31,54 @@
 
 (defun roster--load-sessions ()
   "Return sessions from all enabled tools as a unified list, newest-first."
-  (let ((loaders `((opencode . ,#'roster--opencode-load-sessions)
-                   (claude   . ,#'roster--claude-load-sessions)
-                   (codex    . ,#'roster--codex-load-sessions)
-                   (pi       . ,#'roster--pi-load-sessions))))
-    (roster--sort-sessions
-     (seq-mapcat
-      (lambda (tool)
-        (condition-case err
-            (funcall (alist-get tool loaders) roster-show-archived)
-          (error (message "roster: %s sessions unavailable: %s"
-                          tool (error-message-string err))
-                 nil)))
-      roster-enabled-tools))))
+  (roster--sort-sessions
+   (seq-mapcat
+    (lambda (tool)
+      (condition-case err
+          (roster--backend-call (roster--backend tool)
+                                #'roster-backend-load "session loading"
+                                roster-show-archived)
+        (error (message "roster: %s sessions unavailable: %s"
+                        tool (error-message-string err))
+               nil)))
+    (roster--enabled-tools))))
 
 (defun roster--tool-label (session)
   "Return the short tool tag string for SESSION."
-  (pcase (roster--session-tool session)
-    ('claude "CC")
-    ('codex  "CX")
-    ('pi     "PI")
-    (_       "OC")))
+  (roster-backend-label (roster--session-backend session)))
 
 (defun roster--tool-face (session)
   "Return the face for SESSION's tool tag."
-  (pcase (roster--session-tool session)
-    ('claude 'roster-tool-claude-face)
-    ('codex  'roster-tool-codex-face)
-    ('pi     'roster-tool-pi-face)
-    (_       'roster-tool-opencode-face)))
+  (roster-backend-face (roster--session-backend session)))
 
 (defun roster--session-command (session)
   "Return the shell command used to resume SESSION."
-  (pcase (roster--session-tool session)
-    ('claude
-     (format "%s -r %s"
-             roster-claude-command
-             (shell-quote-argument (roster--session-id session))))
-    ('codex
-     (format "%s resume %s"
-             roster-codex-command
-             (shell-quote-argument (roster--session-id session))))
-    ('pi
-     (format "%s --session %s"
-             roster-pi-command
-             (shell-quote-argument (plist-get session :file-path))))
-    (_
-     (format "%s -s %s"
-             roster-opencode-command
-             (shell-quote-argument (roster--session-id session))))))
+  (roster--session-backend-call
+   session #'roster-backend-resume-command "resume"))
 
 (defun roster--new-session-command (tool)
   "Return the command used to create a new TOOL session."
-  (pcase tool
-    ('claude roster-claude-command)
-    ('codex  roster-codex-command)
-    ('pi     roster-pi-command)
-    (_ roster-opencode-command)))
+  (roster--backend-call (roster--backend tool)
+                        #'roster-backend-new-command "new sessions"))
 
 (defun roster--select-tool-for-new-session ()
   "Return the tool symbol to use for a new session."
-  (if (cdr roster-enabled-tools)
+  (let ((tools
+         (seq-filter
+          (lambda (tool)
+            (when-let ((backend (gethash tool roster--backends)))
+              (roster-backend-new-command backend)))
+          (roster--enabled-tools))))
+    (cond
+     ((null tools) (user-error "No enabled roster backends are registered"))
+     ((cdr tools)
       (intern (completing-read
                "Tool: "
-               (mapcar #'symbol-name roster-enabled-tools)
+               (mapcar #'symbol-name tools)
                nil t nil nil
-               (symbol-name roster-default-new-session-tool)))
-    (or (car roster-enabled-tools) 'opencode)))
+               (when (memq roster-default-new-session-tool tools)
+                 (symbol-name roster-default-new-session-tool)))))
+     (t (car tools)))))
 
 (defun roster--ensure-session-title (title)
   "Return trimmed TITLE or signal a `user-error'."
@@ -249,7 +219,7 @@ With a prefix ARG, open the session directory in Dired first."
 (defun roster-move-directory ()
   "Move the session on the current line to another project directory."
   (interactive)
-  (when (roster--opencode-update-session-directory-command (roster--session-at-point))
+  (when (roster--move-session-command (roster--session-at-point))
     (tabulated-list-revert)))
 
 (defun roster--delete-at-point ()
@@ -407,6 +377,15 @@ With an active region, mark all sessions in the region (no toggle)."
   (roster--clear-marks)
   (message "Cleared all marks"))
 
+(defun roster--for-each-session-by-backend (function sessions)
+  "Call FUNCTION for SESSIONS, sharing each backend's batch scope."
+  (dolist (group (seq-group-by #'roster--session-tool sessions))
+    (let ((backend (roster--backend (car group)))
+          (backend-sessions (cdr group)))
+      (roster--call-with-backend-batch
+       backend
+       (lambda () (mapc function backend-sessions))))))
+
 (defun roster-delete ()
   "Delete all marked sessions after confirmation.
 If no sessions are marked, delete the session on the current line."
@@ -415,13 +394,13 @@ If no sessions are marked, delete the session on the current line."
     (if (null keys)
         (roster--delete-at-point)
       (when (yes-or-no-p (format "Delete %d marked sessions? " (length keys)))
-        (let* (;; Capture the visual row offset of point within the window so
+        (let* ((sessions (seq-keep #'roster--session-by-key keys))
+               ;; Capture the visual row offset of point within the window so
                ;; we can `recenter' to the same screen position after refresh.
                (win-line (count-screen-lines (window-start) (point)))
                (target-id (roster--nearest-surviving-session keys)))
-          (dolist (key keys)
-            (when-let ((session (roster--session-by-key key)))
-              (roster--do-delete-session session)))
+          (roster--for-each-session-by-backend
+           #'roster--do-delete-session sessions)
           (roster--clear-marks)
           (revert-buffer)
           (roster--apply-marks)
@@ -450,9 +429,11 @@ If no sessions are marked, toggle the session on the current line."
         (when (yes-or-no-p (format "%s %d marked sessions? " verb (length sessions)))
           (let* ((win-line (count-screen-lines (window-start) (point)))
                  (target-id (roster--nearest-surviving-session keys)))
-            (dolist (session sessions)
-              (roster--do-archive-session session
-                                          (not (roster--session-archived-p session))))
+            (roster--for-each-session-by-backend
+             (lambda (session)
+               (roster--do-archive-session
+                session (not (roster--session-archived-p session))))
+             sessions)
             (roster--clear-marks)
             (revert-buffer)
             (roster--apply-marks)
@@ -516,41 +497,18 @@ When omitted or nil, the value of `roster-include-archived' is used."
 
 ;;; Command dispatch
 
-(defun roster--opencode-rename-session-command (session)
-  "Rename an OpenCode SESSION via SQLite and return non-nil when changed."
-  (let* ((session-id (plist-get session :id))
+(defun roster--rename-session-command (session)
+  "Rename SESSION and return non-nil when its title is changed."
+  (let* ((session-id (roster--session-id session))
          (old-title (roster--session-title session))
          (new-title (roster--read-session-title session)))
     (if (string= old-title new-title)
         (progn
           (message "Session %s already uses that title" session-id)
           nil)
-      (unless (roster--opencode-set-session-title session-id new-title)
-        (user-error "No session updated for id %s" session-id))
-      (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-        (unless (and updated
-                     (string= (plist-get updated :title) new-title))
-          (user-error "Session %s failed title verification" session-id))
-        (message "Renamed session %s to %s" session-id new-title)
-        t))))
-
-(defun roster--rename-session-command (session)
-  "Rename SESSION and return non-nil when its title is changed."
-  (pcase (plist-get session :tool)
-    ('claude (roster--claude-rename-session-command session))
-    ('codex  (roster--codex-rename-session-command session))
-    ('pi     (roster--pi-rename-session-command session))
-    (_       (roster--opencode-rename-session-command session))))
-
-(defun roster--opencode-do-archive (session archived)
-  "Set an OpenCode SESSION archived state to ARCHIVED without prompting."
-  (let* ((session-id (roster--session-id session))
-         (verb (if archived "Archive" "Unarchive")))
-    (unless (roster--opencode-set-session-archived session-id archived)
-      (user-error "No session updated for id %s" session-id))
-    (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-      (unless (and updated (eq (roster--session-archived-p updated) archived))
-        (user-error "Session %s failed %s verification" session-id (downcase verb)))
+      (roster--session-backend-call
+       session #'roster-backend-rename "rename" new-title)
+      (message "Renamed session %s to %s" session-id new-title)
       t)))
 
 (defun roster--set-archived-command (session archived)
@@ -566,19 +524,13 @@ When omitted or nil, the value of `roster-include-archived' is used."
 
 (defun roster--do-delete-session (session)
   "Delete SESSION without prompting."
-  (pcase (plist-get session :tool)
-    ('claude (roster--claude-delete-session session))
-    ('codex  (roster--codex-delete-session session))
-    ('pi     (roster--pi-delete-session session))
-    (_       (roster--opencode-delete-session session))))
+  (roster--session-backend-call
+   session #'roster-backend-delete "deletion"))
 
 (defun roster--do-archive-session (session archived)
   "Archive SESSION when ARCHIVED is non-nil, otherwise unarchive it."
-  (pcase (plist-get session :tool)
-    ('claude (roster--claude-do-archive session archived))
-    ('codex  (roster--codex-do-archive session archived))
-    ('pi     (roster--pi-do-archive session archived))
-    (_       (roster--opencode-do-archive session archived))))
+  (roster--session-backend-call
+   session #'roster-backend-archive "archiving" archived))
 
 (defun roster--delete-session-command (session)
   "Delete SESSION and return non-nil on success."
@@ -590,67 +542,10 @@ When omitted or nil, the value of `roster-include-archived' is used."
       (message "Deleted session %s from %s" session-id directory)
       t)))
 
-(defun roster--opencode-verify-moved-session (session-id directory project-id project-worktree)
-  "Signal when SESSION-ID does not match DIRECTORY and PROJECT-ID.
-PROJECT-WORKTREE is the expected resolved worktree for PROJECT-ID."
-  (let ((updated (roster--opencode-session-with-project-worktree session-id)))
-    (unless updated
-      (user-error "Updated session %s could not be reloaded" session-id))
-    (unless (and (string= (plist-get updated :directory) directory)
-                 (string= (plist-get updated :project-id) project-id)
-                 (string= (or (plist-get updated :project-worktree) "") project-worktree))
-      (user-error "Session %s failed post-update consistency checks" session-id))))
-
-(defun roster--opencode-target-project-for-directory (directory)
-  "Return the resolved OpenCode project for DIRECTORY or signal a `user-error'."
-  (or (roster--opencode-resolve-target-project directory)
-      (user-error
-       (concat
-        "No OpenCode project matches %s. OpenCode only stays consistent when the target "
-        "directory already exists as a project worktree.")
-       directory)))
-
-(defun roster--opencode-move-session-confirmed-p (session-id old-dir new-dir)
-  "Return non-nil when the user confirms moving SESSION-ID from OLD-DIR to NEW-DIR."
-  (yes-or-no-p (format "Move session %s from %s to %s? " session-id old-dir new-dir)))
-
-(defun roster--opencode-update-session-directory-command (session)
-  "Move SESSION to another known OpenCode project directory.
-Signals a `user-error' for Claude Code, Codex, and pi sessions, since
-those backends do not support directory moves."
-  (when (memq (plist-get session :tool) '(claude codex pi))
-    (user-error "Directory moves are not supported for %s sessions"
-                (pcase (plist-get session :tool)
-                  ('claude "Claude Code")
-                  ('codex  "Codex")
-                  ('pi     "pi"))))
-  (let* ((session-id (plist-get session :id))
-         (old-dir (plist-get session :directory))
-         (old-project-id (plist-get session :project-id))
-         (new-dir (directory-file-name
-                   (expand-file-name
-                    (read-directory-name (format "New directory (current: %s): " old-dir)
-                                         old-dir nil t)))))
-    (unless (file-directory-p new-dir)
-      (user-error "Directory does not exist: %s" new-dir))
-    (let* ((target-project (roster--opencode-target-project-for-directory new-dir))
-           (new-project-id (plist-get target-project :id)))
-      (cond
-       ((and (string= old-dir new-dir)
-             (string= old-project-id new-project-id))
-        (message "Session %s already points to %s" session-id new-dir)
-        nil)
-       ((not (roster--opencode-move-session-confirmed-p session-id old-dir new-dir))
-        nil)
-       (t
-        (unless (roster--opencode-move-session-directory session-id new-dir new-project-id)
-          (user-error "No session updated for id %s" session-id))
-        (roster--opencode-verify-moved-session session-id new-dir new-project-id
-                                               (plist-get target-project :worktree))
-        (message
-         "Moved session %s to %s. Restart active OpenCode views if they still show stale state."
-         session-id new-dir)
-        t)))))
+(defun roster--move-session-command (session)
+  "Move SESSION using its backend capability."
+  (roster--session-backend-call
+   session #'roster-backend-move "directory moves"))
 
 ;;; Public commands
 

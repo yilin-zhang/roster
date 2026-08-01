@@ -75,14 +75,12 @@
 (ert-deftest roster-codex-rename-uses-native-api-and-removes-legacy-sidecar ()
   (let ((session '(:id "cx-1" :title "Old name" :tool codex))
         request deleted-id)
-    (cl-letf (((symbol-function 'roster--read-session-title)
-               (lambda (_session) "New name"))
-              ((symbol-function 'roster--codex-app-server-request)
+    (cl-letf (((symbol-function 'roster--codex-app-server-request)
                (lambda (method params)
                  (setq request (cons method params))))
               ((symbol-function 'roster--codex-delete-legacy-sidecar)
                (lambda (session-id) (setq deleted-id session-id))))
-      (should (roster--codex-rename-session-command session)))
+      (roster--codex-rename-session session "New name"))
     (should (equal request
                    '("thread/name/set"
                      ("threadId" . "cx-1")

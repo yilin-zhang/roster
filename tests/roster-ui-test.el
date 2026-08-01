@@ -27,8 +27,10 @@
   (with-temp-buffer
     (let ((roster-source-function
            (lambda ()
-             '((:id "active" :title "Active" :directory "/tmp/a" :time-updated 1700000000000)
-               (:id "archived" :title "Archived" :directory "/tmp/b" :time-updated 1700000001000 :time-archived 1700000002000))))
+             '((:id "active" :title "Active" :directory "/tmp/a" :tool opencode
+                    :time-updated 1700000000000)
+               (:id "archived" :title "Archived" :directory "/tmp/b" :tool opencode
+                    :time-updated 1700000001000 :time-archived 1700000002000))))
           (roster-show-archived nil))
       (roster-mode)
       (roster--populate)
@@ -39,13 +41,14 @@
   (let* ((session '(:id "ses_1"
 			:title "Decklet Dev"
 			:directory "/tmp/decklet"
+			:tool opencode
 			:time-updated 1700000000000
 			:time-archived 1700000005000))
          (entry (roster--entry session))
          (columns (cadr entry)))
     (should (equal (car entry) '(opencode . "ses_1")))
     (should (string-match-p "Decklet Dev" (aref columns 0)))
-    (should (equal (aref columns 1) "OC"))        ; tool tag (no :tool → opencode)
+    (should (equal (aref columns 1) "OC"))        ; tool tag
     (should (equal (aref columns 2) "ARCHIVED"))  ; state
     (should (equal (aref columns 3) "decklet"))   ; project
     (should (equal (aref columns 4) "/tmp/decklet")) ; directory
@@ -83,59 +86,74 @@
 
 ;;; Tool dispatch
 
-(ert-deftest roster-rename-session-dispatches-by-tool ()
-  (let (captured)
-    (cl-letf (((symbol-function 'roster--claude-rename-session-command)
-               (lambda (_s) (setq captured 'claude) t))
-              ((symbol-function 'roster--codex-rename-session-command)
-               (lambda (_s) (setq captured 'codex) t))
-              ((symbol-function 'roster--pi-rename-session-command)
-               (lambda (_s) (setq captured 'pi) t))
-              ((symbol-function 'roster--opencode-rename-session-command)
-               (lambda (_s) (setq captured 'opencode) t)))
-      (roster--rename-session-command '(:id "c1" :tool claude))
-      (should (eq captured 'claude))
-      (roster--rename-session-command '(:id "cx1" :tool codex))
-      (should (eq captured 'codex))
-      (roster--rename-session-command '(:id "pi1" :tool pi))
-      (should (eq captured 'pi))
-      (roster--rename-session-command '(:id "o1"))
-      (should (eq captured 'opencode)))))
+(ert-deftest roster-custom-backend-uses-registered-capabilities ()
+  (let (renamed archived deleted)
+    (unwind-protect
+        (progn
+          (roster-register-backend
+           (roster-backend-create
+            :id 'test-agent :label "TA" :face 'default
+            :load (lambda (_include-archived) nil)
+            :resume-command (lambda (_session) "test-agent resume")
+            :new-command (lambda () "test-agent new")
+            :rename (lambda (_session title) (setq renamed title))
+            :archive (lambda (_session value) (setq archived value))
+            :delete (lambda (_session) (setq deleted t))))
+          (let ((session '(:id "t1" :title "Old" :directory "/tmp"
+                               :tool test-agent)))
+            (should (equal (roster--tool-label session) "TA"))
+            (should (equal (roster--session-command session) "test-agent resume"))
+            (should (equal (roster--new-session-command 'test-agent)
+                           "test-agent new"))
+            (cl-letf (((symbol-function 'roster--read-session-title)
+                       (lambda (_session) "New"))
+                      ((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+              (roster--rename-session-command session)
+              (roster--set-archived-command session t)
+              (roster--delete-session-command session))
+            (should (equal renamed "New"))
+            (should archived)
+            (should deleted)))
+      (remhash 'test-agent roster--backends))))
 
-(ert-deftest roster-set-archived-command-dispatches-by-tool ()
-  (let (captured)
-    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
-              ((symbol-function 'roster--do-archive-session)
-               (lambda (session _archived)
-                 (setq captured (or (plist-get session :tool) 'opencode)))))
-      (roster--set-archived-command '(:id "c1" :title "T" :tool claude) t)
-      (should (eq captured 'claude))
-      (roster--set-archived-command '(:id "cx1" :title "T" :tool codex) t)
-      (should (eq captured 'codex))
-      (roster--set-archived-command '(:id "pi1" :title "T" :tool pi) t)
-      (should (eq captured 'pi))
-      (roster--set-archived-command '(:id "o1" :title "T") nil)
-      (should (eq captured 'opencode)))))
+(ert-deftest roster-register-backend-rejects-invalid-capabilities ()
+  (should-error
+   (roster-register-backend
+    (roster-backend-create :id 'bad :label "BAD" :face 'default :load t))))
 
-(ert-deftest roster-delete-session-dispatches-by-tool ()
-  (let (captured)
-    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
-              ((symbol-function 'roster--claude-delete-session)
-               (lambda (_s) (setq captured 'claude)))
-              ((symbol-function 'roster--codex-delete-session)
-               (lambda (_s) (setq captured 'codex)))
-              ((symbol-function 'roster--pi-delete-session)
-               (lambda (_s) (setq captured 'pi)))
-              ((symbol-function 'roster--opencode-delete-session)
-               (lambda (_s) (setq captured 'opencode))))
-      (roster--delete-session-command '(:id "c1" :title "T" :tool claude :directory "/d"))
-      (should (eq captured 'claude))
-      (roster--delete-session-command '(:id "cx1" :title "T" :tool codex :directory "/d"))
-      (should (eq captured 'codex))
-      (roster--delete-session-command '(:id "pi1" :title "T" :tool pi :directory "/d"))
-      (should (eq captured 'pi))
-      (roster--delete-session-command '(:id "o1" :title "T" :directory "/d"))
-      (should (eq captured 'opencode)))))
+(ert-deftest roster-new-session-ignores-backends-without-new-capability ()
+  (let ((roster-enabled-tools '(browse-only)))
+    (unwind-protect
+        (progn
+          (roster-register-backend
+           (roster-backend-create
+            :id 'browse-only :label "BO" :face 'default :load #'ignore))
+          (should-error (roster--select-tool-for-new-session) :type 'user-error))
+      (remhash 'browse-only roster--backends))))
+
+(ert-deftest roster-bulk-operations-share-backend-batch-scope ()
+  (let (visited
+        (batch-count 0))
+    (unwind-protect
+        (progn
+          (roster-register-backend
+           (roster-backend-create
+            :id 'batch-agent :label "BA" :face 'default :load #'ignore
+            :batch (lambda (function)
+                     (cl-incf batch-count)
+                     (funcall function))))
+          (roster--for-each-session-by-backend
+           (lambda (session) (push (roster--session-id session) visited))
+           '((:id "one" :tool batch-agent) (:id "two" :tool batch-agent)))
+          (should (= batch-count 1))
+          (should (equal (nreverse visited) '("one" "two"))))
+      (remhash 'batch-agent roster--backends))))
+
+(ert-deftest roster-move-rejects-backends-without-the-capability ()
+  (should-error
+   (roster--move-session-command
+    '(:id "cx1" :title "Codex" :directory "/tmp" :tool codex))
+   :type 'user-error))
 
 ;;; Mark system
 
@@ -179,8 +197,8 @@ not a buffer line)."
 
 (ert-deftest roster--marked-keys-returns-marked ()
   (roster-test--with-list-buffer
-      '((:id "s1" :title "A" :directory "/a" :time-updated 1000)
-	(:id "s2" :title "B" :directory "/b" :time-updated 900))
+      '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode)
+	(:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
     (puthash '(opencode . "s1") t roster--marked)
     (puthash '(opencode . "s2") t roster--marked)
     (should (equal (sort (roster--marked-keys)
@@ -189,7 +207,7 @@ not a buffer line)."
 
 (ert-deftest roster-mark-toggles-on-and-off ()
   (roster-test--with-list-buffer
-      '((:id "s1" :title "A" :directory "/a" :time-updated 1000))
+      '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode))
     ;; First m at point-min: marks the session and advances past it.
     (roster-mark)
     (should (gethash '(opencode . "s1") roster--marked))
@@ -200,15 +218,15 @@ not a buffer line)."
 
 (ert-deftest roster-unmark-removes-mark ()
   (roster-test--with-list-buffer
-      '((:id "s1" :title "A" :directory "/a" :time-updated 1000))
+      '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode))
     (puthash '(opencode . "s1") t roster--marked)
     (roster-unmark)
     (should-not (gethash '(opencode . "s1") roster--marked))))
 
 (ert-deftest roster-unmark-all-clears-all ()
   (roster-test--with-list-buffer
-      '((:id "s1" :title "A" :directory "/a" :time-updated 1000)
-	(:id "s2" :title "B" :directory "/b" :time-updated 900))
+      '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool opencode)
+	(:id "s2" :title "B" :directory "/b" :time-updated 900 :tool opencode))
     (puthash '(opencode . "s1") t roster--marked)
     (puthash '(opencode . "s2") t roster--marked)
     (roster-unmark-all)
@@ -217,9 +235,9 @@ not a buffer line)."
 (ert-deftest roster--nearest-surviving-session-prefers-forward ()
   "When two candidates are equidistant, prefer the one on a following line."
   (roster-test--with-list-buffer
-      '((:id "s1" :title "A" :directory "/a" :time-updated 3000)
-	(:id "s2" :title "B" :directory "/b" :time-updated 2000)
-	(:id "s3" :title "C" :directory "/c" :time-updated 1000))
+      '((:id "s1" :title "A" :directory "/a" :time-updated 3000 :tool opencode)
+	(:id "s2" :title "B" :directory "/b" :time-updated 2000 :tool opencode)
+	(:id "s3" :title "C" :directory "/c" :time-updated 1000 :tool opencode))
     ;; Move to the middle row: sessions are sorted newest-first, so
     ;; s1 is line 1, s2 is line 2, s3 is line 3.
     (forward-line 1)

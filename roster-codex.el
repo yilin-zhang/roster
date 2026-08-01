@@ -9,6 +9,22 @@
 (require 'roster-core)
 (require 'cl-lib)
 
+(defface roster-tool-codex-face
+  `((t :foreground ,(face-attribute 'ansi-color-green :foreground)))
+  "Face for the Codex tool tag in `roster' lists."
+  :group 'roster)
+
+(defcustom roster-codex-dir
+  (expand-file-name "~/.codex")
+  "Path to the Codex configuration directory."
+  :type 'directory
+  :group 'roster)
+
+(defcustom roster-codex-command "codex"
+  "Codex executable name or full path."
+  :type 'string
+  :group 'roster)
+
 (defconst roster--codex-rpc-timeout 5
   "Seconds to wait for a Codex app-server response.")
 
@@ -236,25 +252,41 @@ Include archived threads only when INCLUDE-ARCHIVED is non-nil."
      "thread/delete" `(("threadId" . ,session-id)))
     (roster--codex-delete-legacy-sidecar session-id)))
 
-(defun roster--codex-rename-session-command (session)
-  "Rename Codex SESSION through app-server; return non-nil on change."
-  (let* ((session-id (plist-get session :id))
-         (old-title (roster--session-title session))
-         (new-title (roster--read-session-title session)))
-    (if (string= old-title new-title)
-        (progn (message "Session %s already uses that title" session-id) nil)
-      (roster--codex-app-server-request
-       "thread/name/set"
-       `(("threadId" . ,session-id) ("name" . ,new-title)))
-      (roster--codex-delete-legacy-sidecar session-id)
-      (message "Renamed Codex session %s to %s" session-id new-title)
-      t)))
+(defun roster--codex-rename-session (session new-title)
+  "Rename Codex SESSION to NEW-TITLE through app-server."
+  (let ((session-id (roster--session-id session)))
+    (roster--codex-app-server-request
+     "thread/name/set"
+     `(("threadId" . ,session-id) ("name" . ,new-title)))
+    (roster--codex-delete-legacy-sidecar session-id)))
 
 (defun roster--codex-do-archive (session archived)
   "Set Codex SESSION archived state to ARCHIVED through app-server."
   (roster--codex-app-server-request
    (if archived "thread/archive" "thread/unarchive")
    `(("threadId" . ,(plist-get session :id)))))
+
+(defun roster--codex-resume-command (session)
+  "Return the shell command used to resume Codex SESSION."
+  (format "%s resume %s" roster-codex-command
+          (shell-quote-argument (roster--session-id session))))
+
+(defun roster--codex-new-command ()
+  "Return the shell command used to start a Codex session."
+  roster-codex-command)
+
+(roster-register-backend
+ (roster-backend-create
+  :id 'codex
+  :label "CX"
+  :face 'roster-tool-codex-face
+  :load #'roster--codex-load-sessions
+  :resume-command #'roster--codex-resume-command
+  :new-command #'roster--codex-new-command
+  :rename #'roster--codex-rename-session
+  :archive #'roster--codex-do-archive
+  :delete #'roster--codex-delete-session
+  :batch #'roster--codex-call-with-app-server))
 
 (provide 'roster-codex)
 

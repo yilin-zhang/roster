@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'cl-lib)
 (require 'seq)
 (require 'project)
 (require 'tabulated-list)
@@ -19,6 +20,74 @@
   "Manage coding-agent sessions from Emacs."
   :group 'tools
   :prefix "roster-")
+
+(cl-defstruct (roster-backend (:constructor roster-backend-create))
+  "Operations and display metadata supplied by a session backend.
+MOVE is an interactive backend-specific command.  BATCH, when non-nil, calls
+a thunk inside a backend transaction or shared connection."
+  id label face load resume-command new-command rename archive delete move batch)
+
+(defvar roster--backends (make-hash-table :test #'eq)
+  "Registered roster backends keyed by their tool symbol.")
+
+(defun roster-register-backend (backend)
+  "Register BACKEND and return it.
+BACKEND must provide an id, label, face, and load function.  Every optional
+capability must be callable when present."
+  (unless (roster-backend-p backend)
+    (error "Invalid roster backend: %S" backend))
+  (unless (and (symbolp (roster-backend-id backend))
+               (roster-backend-id backend))
+    (error "Roster backend has invalid id: %S" (roster-backend-id backend)))
+  (unless (and (stringp (roster-backend-label backend))
+               (not (string-empty-p (roster-backend-label backend))))
+    (error "Roster backend %s has invalid label" (roster-backend-id backend)))
+  (unless (symbolp (roster-backend-face backend))
+    (error "Roster backend %s has invalid face" (roster-backend-id backend)))
+  (dolist (slot `((load . ,(roster-backend-load backend))
+                  (resume-command . ,(roster-backend-resume-command backend))
+                  (new-command . ,(roster-backend-new-command backend))
+                  (rename . ,(roster-backend-rename backend))
+                  (archive . ,(roster-backend-archive backend))
+                  (delete . ,(roster-backend-delete backend))
+                  (move . ,(roster-backend-move backend))
+                  (batch . ,(roster-backend-batch backend))))
+    (when (and (cdr slot) (not (functionp (cdr slot))))
+      (error "Roster backend %s has invalid %s capability"
+             (roster-backend-id backend) (car slot))))
+  (unless (functionp (roster-backend-load backend))
+    (error "Roster backend %s has no load capability"
+           (roster-backend-id backend)))
+  (puthash (roster-backend-id backend) backend roster--backends)
+  backend)
+
+(defun roster--backend (tool)
+  "Return the registered backend for TOOL or signal a `user-error'."
+  (or (gethash tool roster--backends)
+      (user-error "Roster backend is not registered: %s" tool)))
+
+(defun roster--session-backend (session)
+  "Return the registered backend that owns SESSION."
+  (roster--backend (roster--session-tool session)))
+
+(defun roster--backend-call (backend accessor capability &rest arguments)
+  "Call BACKEND CAPABILITY from ACCESSOR with ARGUMENTS."
+  (let ((function (funcall accessor backend)))
+    (unless function
+      (user-error "%s sessions do not support %s"
+                  (roster-backend-id backend) capability))
+    (apply function arguments)))
+
+(defun roster--session-backend-call (session accessor capability &rest arguments)
+  "Call SESSION backend CAPABILITY from ACCESSOR with ARGUMENTS."
+  (apply #'roster--backend-call (roster--session-backend session)
+         accessor capability session arguments))
+
+(defun roster--call-with-backend-batch (backend function)
+  "Call FUNCTION inside BACKEND's batch scope when it provides one."
+  (if-let ((batch (roster-backend-batch backend)))
+      (funcall batch function)
+    (funcall function)))
 
 ;;; Faces
 
@@ -52,26 +121,6 @@
   "Face for timestamps in `roster' lists."
   :group 'roster)
 
-(defface roster-tool-opencode-face
-  `((t :foreground ,(face-attribute 'ansi-color-blue :foreground)))
-  "Face for the OpenCode tool tag in `roster' lists."
-  :group 'roster)
-
-(defface roster-tool-claude-face
-  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
-  "Face for the Claude Code tool tag in `roster' lists."
-  :group 'roster)
-
-(defface roster-tool-codex-face
-  `((t :foreground ,(face-attribute 'ansi-color-green :foreground)))
-  "Face for the Codex tool tag in `roster' lists."
-  :group 'roster)
-
-(defface roster-tool-pi-face
-  `((t :foreground ,(face-attribute 'ansi-color-red :foreground)))
-  "Face for the pi tool tag in `roster' lists."
-  :group 'roster)
-
 (defface roster-mark-face
   '((((background dark)) (:background "DarkGoldenrod4"))
     (t (:background "LightYellow1")))
@@ -94,60 +143,19 @@ The function is called with two args: DIRECTORY and COMMAND."
   :type 'boolean
   :group 'roster)
 
-(defcustom roster-opencode-db-path
-  (expand-file-name "~/.local/share/opencode/opencode.db")
-  "Path to OpenCode SQLite database."
-  :type 'file
-  :group 'roster)
-
-(defcustom roster-opencode-command "opencode"
-  "OpenCode executable name or full path."
-  :type 'string
-  :group 'roster)
-
-(defcustom roster-claude-dir
-  (expand-file-name "~/.claude")
-  "Path to the Claude Code configuration directory."
-  :type 'directory
-  :group 'roster)
-
-(defcustom roster-claude-command "claude"
-  "Claude Code executable name or full path."
-  :type 'string
-  :group 'roster)
-
-(defcustom roster-codex-dir
-  (expand-file-name "~/.codex")
-  "Path to the Codex configuration directory."
-  :type 'directory
-  :group 'roster)
-
-(defcustom roster-codex-command "codex"
-  "Codex executable name or full path."
-  :type 'string
-  :group 'roster)
-
-(defcustom roster-pi-dir
-  (expand-file-name "~/.pi/agent")
-  "Path to the pi configuration directory."
-  :type 'directory
-  :group 'roster)
-
-(defcustom roster-pi-command "pi"
-  "The pi executable name or full path."
-  :type 'string
-  :group 'roster)
-
 (defcustom roster-enabled-tools '(opencode claude codex pi)
-  "List of tools whose sessions are shown by roster.
-Valid elements are the symbols `opencode', `claude', `codex', and `pi'."
-  :type '(set (const opencode) (const claude) (const codex) (const pi))
+  "List of registered backend symbols whose sessions roster shows."
+  :type '(repeat symbol)
   :group 'roster)
+
+(defun roster--enabled-tools ()
+  "Return enabled backend symbols without duplicates."
+  (seq-uniq roster-enabled-tools #'eq))
 
 (defcustom roster-default-new-session-tool 'opencode
   "Default tool when creating a new session and multiple tools are enabled.
 Must be a symbol present in `roster-enabled-tools'."
-  :type '(choice (const opencode) (const claude) (const codex) (const pi))
+  :type 'symbol
   :group 'roster)
 
 ;;; Variables
@@ -184,8 +192,9 @@ Must be a symbol present in `roster-enabled-tools'."
 ;;; Core
 
 (defun roster--session-tool (session)
-  "Return SESSION backend symbol, defaulting to `opencode'."
-  (or (plist-get session :tool) 'opencode))
+  "Return SESSION backend symbol or signal for malformed session data."
+  (or (plist-get session :tool)
+      (error "Session has no backend: %S" session)))
 
 (defun roster--session-id (session)
   "Return SESSION id."

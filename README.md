@@ -84,8 +84,9 @@ agent executable names and data locations.
 ## Development
 
 The package is split into a shared core, one backend module per supported tool,
-and the list UI in `roster.el`. Tests follow the same backend/UI split under
-`tests/`.
+and the list UI in `roster.el`. Backends register their display metadata and
+supported operations through `roster-register-backend`, so the UI contains no
+tool-specific dispatch. Tests follow the same backend/UI split under `tests/`.
 
 Run the complete local check suite with:
 
