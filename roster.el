@@ -124,13 +124,15 @@ otherwise return `default-directory'."
          (tool (roster--select-tool-for-new-session)))
     (funcall roster-terminal-function dir (roster--new-session-command tool))))
 
-(defun roster--resume-session (session &optional jump)
+(defun roster--resume-session (session &optional jump terminal-function)
   "Resume SESSION in a terminal window.
-When JUMP is non-nil, open the session directory in Dired first."
+When JUMP is non-nil, open the session directory in Dired first.
+TERMINAL-FUNCTION overrides `roster-terminal-function' when non-nil."
   (let ((directory (roster--session-directory session)))
     (when jump
       (dired directory))
-    (funcall roster-terminal-function directory (roster--session-command session))))
+    (funcall (or terminal-function roster-terminal-function)
+             directory (roster--session-command session))))
 
 ;;; Mode internals
 
@@ -197,6 +199,12 @@ When JUMP is non-nil, open the session directory in Dired first."
 With a prefix ARG, open the session directory in Dired first."
   (interactive "P")
   (roster--resume-session (roster--session-at-point) arg))
+
+(defun roster-resume-with-terminal ()
+  "Choose an available terminal and resume the session on the current line."
+  (interactive)
+  (roster--resume-session (roster--session-at-point) nil
+                          (roster--read-terminal-function)))
 
 (defun roster-open-directory ()
   "Open the current session's directory in Dired."
@@ -449,6 +457,7 @@ If no sessions are marked, toggle the session on the current line."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'roster-resume)
+    (define-key map (kbd "S-<return>") #'roster-resume-with-terminal)
     (define-key map (kbd "e") #'roster-resume)
     (define-key map (kbd "d") #'roster-delete)
     (define-key map (kbd "r") #'roster-rename)

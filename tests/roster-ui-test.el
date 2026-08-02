@@ -155,6 +155,42 @@
     '(:id "cx1" :title "Codex" :directory "/tmp" :tool codex))
    :type 'user-error))
 
+;;; Terminal dispatch
+
+(ert-deftest roster-available-terminal-options-filters-unavailable-entries ()
+  (let ((roster-terminal-options
+         '(("Always" ignore nil)
+           ("Ready" forward-char roster-test--terminal-available-p)
+           ("Missing" backward-char roster-test--terminal-unavailable-p))))
+    (cl-letf (((symbol-function 'roster-test--terminal-available-p)
+               (lambda () t))
+              ((symbol-function 'roster-test--terminal-unavailable-p)
+               (lambda () nil)))
+      (should (equal (mapcar #'car (roster--available-terminal-options))
+                     '("Always" "Ready"))))))
+
+(ert-deftest roster-read-terminal-function-returns-selected-launcher ()
+  (let ((roster-terminal-options
+         '(("First" ignore nil) ("Second" forward-char nil))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "Second")))
+      (should (eq (roster--read-terminal-function) #'forward-char)))))
+
+(ert-deftest roster-resume-session-accepts-terminal-override ()
+  (let (called)
+    (cl-letf (((symbol-function 'roster--session-directory)
+               (lambda (_session) "/tmp/project"))
+              ((symbol-function 'roster--session-command)
+               (lambda (_session) "agent resume")))
+      (roster--resume-session
+       '(:id "one") nil
+       (lambda (directory command) (setq called (list directory command))))
+      (should (equal called '("/tmp/project" "agent resume"))))))
+
+(ert-deftest roster-mode-binds-shift-return-to-terminal-selection ()
+  (should (eq (lookup-key roster-mode-map (kbd "S-<return>"))
+              #'roster-resume-with-terminal)))
+
 ;;; Mark system
 
 (defmacro roster-test--with-list-buffer (sessions &rest body)

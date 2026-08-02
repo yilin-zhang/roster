@@ -55,6 +55,15 @@ On macOS, Roster includes launchers for Ghostty and iTerm:
 (setq roster-terminal-function #'roster-open-in-iterm)
 ```
 
+Ghostel is also supported as an Emacs-native terminal:
+
+```elisp
+(setq roster-terminal-function #'roster-open-in-ghostel)
+```
+
+Press `S-RET` on a session to choose among the terminals currently available
+on the system without changing the default.
+
 Use `M-x customize-group RET roster` to see all available options, including
 agent executable names and data locations.
 
@@ -63,6 +72,7 @@ agent executable names and data locations.
 | Key         | Action                                                  |
 |-------------|---------------------------------------------------------|
 | `RET` / `e` | Resume session                                          |
+| `S-RET`     | Choose an available terminal and resume session         |
 | `r`         | Rename session                                          |
 | `a`         | Archive/unarchive marked sessions (or session at point) |
 | `d`         | Delete marked sessions (or session at point)            |

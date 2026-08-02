@@ -133,9 +133,24 @@ capability must be callable when present."
   :group 'roster)
 
 (defcustom roster-terminal-function #'roster-open-in-ghostty
-  "Function used to open an external terminal and run a command.
+  "Function used to open a terminal and run a command.
 The function is called with two args: DIRECTORY and COMMAND."
   :type 'function
+  :group 'roster)
+
+(defcustom roster-terminal-options
+  '(("Ghostel" roster-open-in-ghostel roster--ghostel-available-p)
+    ("Ghostty" roster-open-in-ghostty roster--ghostty-available-p)
+    ("iTerm" roster-open-in-iterm roster--iterm-available-p))
+  "Terminals offered when choosing a launcher interactively.
+Each entry has the form (NAME FUNCTION AVAILABILITY).  FUNCTION accepts
+DIRECTORY and COMMAND.  AVAILABILITY is either nil or a predicate called
+without arguments; entries whose predicate returns nil are omitted."
+  :type '(repeat
+          (list (string :tag "Name")
+                (function :tag "Launcher")
+                (choice (const :tag "Always available" nil)
+                        (function :tag "Availability predicate"))))
   :group 'roster)
 
 (defcustom roster-include-archived t
@@ -316,6 +331,74 @@ TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
       nil))))
 
 ;;; Terminal functions
+
+(defun roster--application-available-p (name)
+  "Return non-nil when macOS application NAME is installed."
+  (and (eq system-type 'darwin)
+       (seq-some
+        #'file-directory-p
+        (list (expand-file-name name "/Applications/")
+              (expand-file-name name "/System/Applications/")
+              (expand-file-name name "~/Applications/")))))
+
+(defun roster--ghostel-available-p ()
+  "Return non-nil when the Ghostel package is available."
+  (or (featurep 'ghostel) (locate-library "ghostel")))
+
+(defun roster--ghostty-available-p ()
+  "Return non-nil when Ghostty is available on this system."
+  (and (eq system-type 'darwin)
+       (or (executable-find "ghostty")
+           (roster--application-available-p "Ghostty.app"))))
+
+(defun roster--iterm-available-p ()
+  "Return non-nil when iTerm is available on this system."
+  (roster--application-available-p "iTerm.app"))
+
+(defun roster--terminal-option-available-p (option)
+  "Return non-nil when terminal OPTION is currently available."
+  (let ((predicate (nth 2 option)))
+    (or (null predicate)
+        (condition-case nil
+            (funcall predicate)
+          (error nil)))))
+
+(defun roster--available-terminal-options ()
+  "Return entries from `roster-terminal-options' that are available."
+  (seq-filter #'roster--terminal-option-available-p roster-terminal-options))
+
+(defun roster--read-terminal-function ()
+  "Prompt for an available terminal and return its launcher function."
+  (let ((options (roster--available-terminal-options)))
+    (unless options
+      (user-error "No roster terminals are available"))
+    (let* ((default (seq-find
+                     (lambda (option)
+                       (eq (nth 1 option) roster-terminal-function))
+                     options))
+           (name (completing-read "Terminal: " (mapcar #'car options)
+                                  nil t nil nil (car default))))
+      (nth 1 (assoc name options)))))
+
+(defun roster-open-in-ghostel (directory command)
+  "Open Ghostel in DIRECTORY and run COMMAND in a new buffer."
+  (unless (require 'ghostel nil t)
+    (user-error "Ghostel is not available"))
+  (let* ((dir (file-name-as-directory (expand-file-name directory)))
+         (shell (or (getenv "SHELL") "/bin/sh"))
+         (shell-command (format "%s; exec %s -l"
+                                command (shell-quote-argument shell)))
+         (buffer (generate-new-buffer "*roster terminal*")))
+    (condition-case err
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory dir))
+          (pop-to-buffer buffer)
+          (ghostel-exec buffer shell (list "-lc" shell-command)))
+      (error
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))
+       (signal (car err) (cdr err))))))
 
 (defun roster-open-in-ghostty (directory command)
   "Open Ghostty in DIRECTORY and run COMMAND in a new tab."
