@@ -8,7 +8,6 @@ if [[ "${1:-}" == "--fix" ]]; then
   export ROSTER_FIX_INDENT=1
 fi
 
-# Load test definitions so their custom macro indentation declarations apply.
-emacs --batch -Q -L . -L tests \
-  -l roster -l tests/roster-test.el -l scripts/roster-check.el \
-  -f roster-check-indent
+# Macro indentation declarations are read straight out of the sources by
+# `roster-check--register-indent-specs', so nothing needs loading here.
+emacs --batch -Q -l scripts/roster-check.el -f roster-check-indent
