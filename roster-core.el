@@ -14,6 +14,11 @@
 (require 'json)
 (require 'ansi-color)
 
+;; Ghostel is an optional runtime dependency, loaded on demand by
+;; `roster-open-in-ghostel'.  Declare it so byte compilation stays clean
+;; without pulling the package in as a hard requirement.
+(declare-function ghostel-exec "ghostel" (buffer program &optional args))
+
 ;;; Customization
 
 (defgroup roster nil

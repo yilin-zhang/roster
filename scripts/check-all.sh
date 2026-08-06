@@ -11,7 +11,12 @@ echo "[2/7] Check indentation"
 ./scripts/check-indent.sh
 
 echo "[3/7] Byte compile"
-emacs --batch -L . -f batch-byte-compile \
+# `byte-compile-error-on-warn' makes warnings fail the build; without it
+# `batch-byte-compile' exits 0 and real defects (a macro used before its
+# definition, a misdeclared optional dependency) scroll past a green run.
+emacs --batch -L . \
+  --eval '(setq byte-compile-error-on-warn t)' \
+  -f batch-byte-compile \
   roster-core.el roster-opencode.el roster-claude.el \
   roster-codex.el roster-pi.el roster.el
 
