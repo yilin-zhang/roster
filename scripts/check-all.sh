@@ -14,11 +14,11 @@ echo "[3/7] Byte compile"
 # `byte-compile-error-on-warn' makes warnings fail the build; without it
 # `batch-byte-compile' exits 0 and real defects (a macro used before its
 # definition, a misdeclared optional dependency) scroll past a green run.
+# Glob rather than list files: a hand-maintained list silently stops
+# covering a source file the moment a new one is added.
 emacs --batch -L . \
   --eval '(setq byte-compile-error-on-warn t)' \
-  -f batch-byte-compile \
-  roster-core.el roster-opencode.el roster-claude.el \
-  roster-codex.el roster-pi.el roster.el
+  -f batch-byte-compile roster*.el
 
 echo "[4/7] Remove generated .elc"
 find . -name '*.elc' -delete
