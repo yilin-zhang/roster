@@ -35,11 +35,44 @@ unarchive operation."
 (defconst roster--opencode-server-timeout 5
   "Seconds to wait for OpenCode's local server and HTTP responses.")
 
+(defcustom roster-opencode-server-idle-seconds 300
+  "Seconds an unused roster OpenCode server remains alive.
+Set to zero to keep it alive until Emacs exits."
+  :type 'natnum
+  :group 'roster)
+
+(defconst roster--opencode-output-limit 65536
+  "Maximum retained characters of OpenCode server output.")
+
 (defvar roster--opencode-process nil)
 (defvar roster--opencode-output nil)
 (defvar roster--opencode-base-url nil)
+(defvar roster--opencode-idle-timer nil)
+(defvar roster--opencode-use-depth 0)
 
 ;;; Server lifecycle
+
+(defun roster--opencode-server-command ()
+  "Return the command used to start roster's OpenCode server."
+  (list roster-opencode-command "serve" "--pure"
+        "--hostname" "127.0.0.1" "--port" "0"))
+
+(defun roster--opencode-trim-output (buffer)
+  "Keep only recent OpenCode server output in BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (> (buffer-size) roster--opencode-output-limit)
+        (delete-region (point-min)
+                       (- (point-max) roster--opencode-output-limit))))))
+
+(defun roster--opencode-process-filter (process output)
+  "Append OUTPUT from OpenCode PROCESS while bounding its log buffer."
+  (when-let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (goto-char (point-max))
+        (insert output))
+      (roster--opencode-trim-output buffer))))
 
 (defun roster--opencode-server-url (buffer)
   "Return the OpenCode server URL announced in BUFFER, or nil."
@@ -58,20 +91,48 @@ unarchive operation."
                 (process-live-p process)
                 (< (float-time) deadline))
       (accept-process-output process 0.05)
+      (roster--opencode-trim-output buffer)
       (setq url (roster--opencode-server-url buffer)))
     (or url
         (user-error "OpenCode server failed to start: %s"
                     (string-trim
                      (with-current-buffer buffer (buffer-string)))))))
 
-(defun roster--opencode-call-with-server (function)
-  "Call FUNCTION while one scoped OpenCode server is available."
-  (let ((output (generate-new-buffer " *roster-opencode-server*"))
-        process)
-    (unwind-protect
+(defun roster--opencode-cancel-idle-timer ()
+  "Cancel the pending OpenCode idle shutdown timer."
+  (when (timerp roster--opencode-idle-timer)
+    (cancel-timer roster--opencode-idle-timer))
+  (setq roster--opencode-idle-timer nil))
+
+(defun roster--opencode-stop-server ()
+  "Stop roster's persistent OpenCode server and clear its state."
+  (let ((process roster--opencode-process)
+        (output roster--opencode-output))
+    (roster--opencode-cancel-idle-timer)
+    (setq roster--opencode-process nil
+          roster--opencode-output nil
+          roster--opencode-base-url nil)
+    (when (process-live-p process)
+      (delete-process process))
+    (when (buffer-live-p output)
+      (kill-buffer output))))
+
+(defun roster--opencode-process-sentinel (process _event)
+  "Clear persistent server state when OpenCode PROCESS exits."
+  (when (and (eq process roster--opencode-process)
+             (not (process-live-p process)))
+    (roster--opencode-stop-server)))
+
+(defun roster--opencode-start-server ()
+  "Start and initialize roster's persistent OpenCode server."
+  (roster--opencode-stop-server)
+  (let* ((output (generate-new-buffer " *roster-opencode-server*"))
+         (command (roster--opencode-server-command))
+         process)
+    (condition-case err
         (progn
-          ;; This is a fresh loopback-only server on an ephemeral port.  Do not
-          ;; inherit credentials intended for a user's persistent server.
+          ;; Keep the loopback-only server independent of credentials intended
+          ;; for a user's separately managed OpenCode server.
           (let ((process-environment
                  (seq-remove
                   (lambda (entry)
@@ -83,27 +144,62 @@ unarchive operation."
                    :name "roster-opencode-server"
                    :buffer output
                    :stderr output
-                   :command (list roster-opencode-command "serve" "--pure"
-                                  "--hostname" "127.0.0.1" "--port" "0")
+                   :command command
                    :connection-type 'pipe
                    :coding 'utf-8-unix
+                   :filter #'roster--opencode-process-filter
+                   :sentinel #'roster--opencode-process-sentinel
                    :noquery t)))
-          (let ((roster--opencode-process process)
-                (roster--opencode-output output)
-                (roster--opencode-base-url
-                 (roster--opencode-wait-for-server process output)))
-            (funcall function)))
-      (when (process-live-p process)
-        (delete-process process))
-      (kill-buffer output))))
+          (setq roster--opencode-process process
+                roster--opencode-output output
+                roster--opencode-base-url
+                (roster--opencode-wait-for-server process output))
+          process)
+      (error
+       (if (eq process roster--opencode-process)
+           (roster--opencode-stop-server)
+         (when (process-live-p process)
+           (delete-process process))
+         (when (buffer-live-p output)
+           (kill-buffer output)))
+       (signal (car err) (cdr err))))))
 
-(defun roster--opencode-call-with-server-if-needed (function)
-  "Call FUNCTION, reusing the dynamically scoped OpenCode server."
-  (if (and roster--opencode-process
-           (process-live-p roster--opencode-process)
-           roster--opencode-base-url)
-      (funcall function)
-    (roster--opencode-call-with-server function)))
+(defun roster--opencode-server-ready-p ()
+  "Return non-nil when the reusable OpenCode server is ready."
+  (and (process-live-p roster--opencode-process)
+       roster--opencode-base-url
+       (equal (process-command roster--opencode-process)
+              (roster--opencode-server-command))))
+
+(defun roster--opencode-touch-server ()
+  "Reschedule shutdown of the reusable OpenCode server."
+  (roster--opencode-cancel-idle-timer)
+  (when (> roster-opencode-server-idle-seconds 0)
+    (setq roster--opencode-idle-timer
+          (run-at-time roster-opencode-server-idle-seconds nil
+                       #'roster--opencode-stop-server))))
+
+(defun roster--opencode-call-with-server (function)
+  "Call FUNCTION while the reusable OpenCode server is available."
+  (roster--opencode-cancel-idle-timer)
+  (unless (roster--opencode-server-ready-p)
+    (roster--opencode-start-server))
+  (cl-incf roster--opencode-use-depth)
+  (condition-case err
+      (unwind-protect
+          (funcall function)
+        (cl-decf roster--opencode-use-depth)
+        (when (zerop roster--opencode-use-depth)
+          (roster--opencode-trim-output roster--opencode-output)
+          (roster--opencode-touch-server)))
+    (error
+     ;; Do not retry mutations automatically.  Retire a suspect transport so
+     ;; the next user action gets a fresh server instead of extending its life.
+     (when (zerop roster--opencode-use-depth)
+       (roster--opencode-stop-server))
+     (signal (car err) (cdr err)))))
+
+(add-hook 'kill-emacs-hook #'roster--opencode-stop-server)
 
 ;;; HTTP protocol
 
@@ -154,7 +250,7 @@ Return a cons of the response headers and decoded JSON body."
 (defun roster--opencode-request (method path &optional parameters body)
   "Send METHOD to OpenCode PATH with PARAMETERS and JSON BODY.
 Return a cons of response headers and decoded JSON body."
-  (roster--opencode-call-with-server-if-needed
+  (roster--opencode-call-with-server
    (lambda ()
      (let* ((url-request-method method)
             (url-request-extra-headers

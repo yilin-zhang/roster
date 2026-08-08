@@ -60,6 +60,8 @@ the SDK and nil always uses the compatibility implementation."
   (when (called-interactively-p 'interactive)
     (message "Reset roster's Claude Agent SDK availability cache")))
 
+(add-hook 'roster-clear-caches-hook #'roster--claude-reset-sdk-cache)
+
 (defun roster--claude-sdk-call (&rest arguments)
   "Call the Claude Agent SDK bridge with ARGUMENTS and return its result."
   (let ((cache-key (roster--claude-sdk-cache-key)))
@@ -103,6 +105,34 @@ by the user, and cannot be resumed with `claude -r', so roster hides them.")
 
 (defconst roster--claude-entrypoint-read-size 65536
   "Maximum number of transcript bytes read when checking its entrypoint.")
+
+(defvar roster--claude-transcript-cache (make-hash-table :test #'equal)
+  "Transcript metadata cached by absolute file name.")
+
+(defun roster--claude-clear-transcript-cache ()
+  "Discard all cached Claude transcript metadata."
+  (clrhash roster--claude-transcript-cache))
+
+(add-hook 'roster-clear-caches-hook #'roster--claude-clear-transcript-cache)
+
+(defun roster--claude-transcript-fingerprint (attributes)
+  "Return the cache fingerprint represented by file ATTRIBUTES."
+  (when attributes
+    (list (file-attribute-modification-time attributes)
+          (file-attribute-size attributes))))
+
+(defun roster--claude-prune-transcript-cache (paths)
+  "Remove cached transcript entries whose file is not present in PATHS."
+  (let ((live (make-hash-table :test #'equal))
+        stale)
+    (dolist (path paths)
+      (puthash path t live))
+    (maphash (lambda (path _entry)
+               (unless (gethash path live)
+                 (push path stale)))
+             roster--claude-transcript-cache)
+    (dolist (path stale)
+      (remhash path roster--claude-transcript-cache))))
 
 (defun roster--claude-jsonl-files (projects-dir)
   "Return `(ENCODED-DIR . PATH)' pairs for Claude JSONL files in PROJECTS-DIR.
@@ -274,8 +304,9 @@ Return nil when PATH is not an interactive CLI session transcript."
               :encoded-dir encoded-dir
               :file-path path)))))
 
-(defun roster--claude-parse-jsonl (path)
+(defun roster--claude-parse-jsonl-uncached (path attributes)
   "Return metadata plist from a Claude Code JSONL file at PATH.
+ATTRIBUTES are the file attributes captured before reading.
 Returns plist with keys :slug, :cwd, :title-candidate, :entrypoint,
 :custom-title, :ai-title, and :time-updated (file mtime in milliseconds)."
   (condition-case nil
@@ -305,8 +336,8 @@ Returns plist with keys :slug, :cwd, :title-candidate, :entrypoint,
                      (when (and (stringp value) (not (string-empty-p value)))
                        (setq ai-title value)))))))
             (forward-line 1)))
-        (let* ((attrs (file-attributes path))
-               (mtime (when attrs (file-attribute-modification-time attrs)))
+        (let* ((mtime (when attributes
+                        (file-attribute-modification-time attributes)))
                (time-updated (if mtime
                                  (floor (* roster--ms-per-second (float-time mtime)))
                                0)))
@@ -319,17 +350,36 @@ Returns plist with keys :slug, :cwd, :title-candidate, :entrypoint,
                 :time-updated time-updated)))
     (error nil)))
 
+(defun roster--claude-parse-jsonl (path)
+  "Return cached metadata parsed from Claude Code JSONL file PATH."
+  (let* ((attributes (file-attributes path))
+         (fingerprint (roster--claude-transcript-fingerprint attributes))
+         (cached (gethash path roster--claude-transcript-cache)))
+    (if (and fingerprint (equal (car cached) fingerprint))
+        (cdr cached)
+      (let ((metadata (roster--claude-parse-jsonl-uncached path attributes)))
+        (when (and metadata
+                   (equal fingerprint
+                          (roster--claude-transcript-fingerprint
+                           (file-attributes path))))
+          (puthash path (cons fingerprint metadata)
+                   roster--claude-transcript-cache))
+        metadata))))
+
 (defun roster--claude-load-sessions-from-transcripts (&optional include-archived)
   "Return Claude sessions from documented transcripts.
 INCLUDE-ARCHIVED controls roster's sidecar archive metadata."
   (let ((projects-dir (roster--claude-projects-dir)))
     (when (file-directory-p projects-dir)
-      (let ((sessions
-             (delq nil
-                   (mapcar (lambda (entry)
-                             (roster--claude-session-from-file
-                              (car entry) (cdr entry)))
-                           (roster--claude-jsonl-files projects-dir)))))
+      (let* ((files (roster--claude-jsonl-files projects-dir))
+             (paths (mapcar #'cdr files))
+             (sessions
+              (delq nil
+                    (mapcar (lambda (entry)
+                              (roster--claude-session-from-file
+                               (car entry) (cdr entry)))
+                            files))))
+        (roster--claude-prune-transcript-cache paths)
         (if include-archived sessions (roster--active-sessions sessions))))))
 
 (defun roster--claude-session-from-sdk (value)

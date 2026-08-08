@@ -186,6 +186,12 @@ Must be a symbol present in `roster-enabled-tools'."
 (defvar-local roster-source-function nil
   "Function returning sessions for the current `roster' list buffer.")
 
+(defvar-local roster-session-filter-function #'identity
+  "Function filtering loaded sessions for the current roster view.")
+
+(defvar-local roster-backend-source-p nil
+  "Whether the current source is roster's built-in backend source.")
+
 (defvar-local roster-show-archived roster-include-archived
   "Whether the current `roster' list buffer shows archived sessions.")
 
@@ -197,6 +203,15 @@ Must be a symbol present in `roster-enabled-tools'."
 
 (defvar-local roster--sessions nil
   "Sessions represented by the current `roster' buffer contents.")
+
+(defvar-local roster--all-sessions nil
+  "All loaded sessions available to the current roster view.")
+
+(defvar-local roster--snapshot-includes-archived nil
+  "Whether `roster--all-sessions' includes archived backend sessions.")
+
+(defvar roster-clear-caches-hook nil
+  "Hook run before a hard roster refresh.")
 
 ;;; Constants
 

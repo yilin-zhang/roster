@@ -37,6 +37,124 @@
       (should (= (length tabulated-list-entries) 1))
       (should (equal (caar tabulated-list-entries) '(opencode . "active"))))))
 
+(ert-deftest roster-toggle-archived-renders-loaded-snapshot-only ()
+  (roster-test--with-list-buffer
+      '((:id "active" :title "Active" :directory "/a" :tool opencode
+             :time-updated 2000)
+        (:id "archived" :title "Archived" :directory "/b" :tool opencode
+             :time-updated 1000 :time-archived 1500))
+    (setq-local roster-source-function
+                (lambda () (error "archive toggle reloaded a backend")))
+    (puthash '(opencode . "active") t roster--marked)
+    (roster-toggle-archived)
+    (should (equal (mapcar #'car tabulated-list-entries)
+                   '((opencode . "active"))))
+    (should (gethash '(opencode . "active") roster--mark-overlays))
+    (roster-toggle-archived)
+    (should (= (length tabulated-list-entries) 2))))
+
+(ert-deftest roster-backend-source-loads-archives-only-when-needed ()
+  (with-temp-buffer
+    (roster-mode)
+    (let (calls)
+      (setq-local roster-backend-source-p t)
+      (setq-local roster-show-archived nil)
+      (setq-local roster-source-function
+                  (lambda (include-archived)
+                    (push include-archived calls)
+                    (if include-archived
+                        '((:id "active" :title "Active" :directory "/a"
+                               :tool opencode :time-updated 2000)
+                          (:id "archived" :title "Archived" :directory "/b"
+                               :tool opencode :time-updated 1000
+                               :time-archived 1500))
+                      '((:id "active" :title "Active" :directory "/a"
+                             :tool opencode :time-updated 2000)))))
+      (roster--populate)
+      (should-not roster--snapshot-includes-archived)
+      (should (equal calls '(nil)))
+      (tabulated-list-print t)
+      (roster-toggle-archived)
+      (should roster--snapshot-includes-archived)
+      (should (equal calls '(t nil)))
+      (should (= (length tabulated-list-entries) 2)))))
+
+(ert-deftest roster-reload-tools-replaces-only-requested-backend ()
+  (let (loaded)
+    (unwind-protect
+        (progn
+          (roster-register-backend
+           (roster-backend-create
+            :id 'reload-a :label "A" :face 'default
+            :load (lambda (_include-archived)
+                    (push 'reload-a loaded)
+                    '((:id "a-new" :title "A new" :directory "/a"
+                           :tool reload-a :time-updated 3000)))))
+          (roster-register-backend
+           (roster-backend-create
+            :id 'reload-b :label "B" :face 'default
+            :load (lambda (_include-archived)
+                    (push 'reload-b loaded)
+                    (error "unrelated backend loaded"))))
+          (roster-test--with-list-buffer
+              '((:id "a-old" :title "A old" :directory "/a" :tool reload-a
+                     :time-updated 2000)
+                (:id "b-old" :title "B old" :directory "/b" :tool reload-b
+                     :time-updated 1000))
+            (setq-local roster-backend-source-p t)
+            (roster--reload-tools '(reload-a))
+            (should (equal loaded '(reload-a)))
+            (should (equal (mapcar #'roster--session-id roster--all-sessions)
+                           '("a-new" "b-old")))))
+      (remhash 'reload-a roster--backends)
+      (remhash 'reload-b roster--backends))))
+
+(ert-deftest roster-reload-tools-keeps-old-data-when-reload-fails ()
+  (unwind-protect
+      (progn
+        (roster-register-backend
+         (roster-backend-create
+          :id 'reload-fails :label "F" :face 'default
+          :load (lambda (_include-archived) (error "temporary failure"))))
+        (roster-test--with-list-buffer
+            '((:id "old" :title "Old" :directory "/old" :tool reload-fails
+                   :time-updated 1000))
+          (setq-local roster-backend-source-p t)
+          (roster--reload-tools '(reload-fails))
+          (should (equal (mapcar #'roster--session-id roster--all-sessions)
+                         '("old")))))
+    (remhash 'reload-fails roster--backends)))
+
+(ert-deftest roster-custom-source-falls-back-to-full-refresh-after-mutation ()
+  (let ((sessions '((:id "one" :title "One" :directory "/one"
+                         :tool opencode :time-updated 1000)))
+        (loads 0))
+    (with-temp-buffer
+      (roster-mode)
+      (setq-local roster-source-function
+                  (lambda () (cl-incf loads) sessions))
+      (roster--populate)
+      (setq sessions '((:id "two" :title "Two" :directory "/two"
+                            :tool opencode :time-updated 2000)))
+      (roster--reload-tools '(opencode))
+      (should (= loads 2))
+      (should (equal (mapcar #'roster--session-id roster--all-sessions)
+                     '("two"))))))
+
+(ert-deftest roster-hard-refresh-runs-cache-clear-hook ()
+  (with-temp-buffer
+    (roster-mode)
+    (let* ((clears 0)
+           (reverts 0)
+           (roster-clear-caches-hook
+            (list (lambda () (cl-incf clears)))))
+      (cl-letf (((symbol-function 'revert-buffer)
+                 (lambda (&rest _) (cl-incf reverts))))
+        (roster-refresh)
+        (roster-refresh t))
+      (should (= clears 1))
+      (should (= reverts 2)))))
+
 (ert-deftest roster-entry-includes-derived-columns ()
   (let* ((session '(:id "ses_1"
                         :title "Decklet Dev"
@@ -283,7 +401,7 @@ not a buffer line)."
       (should (equal nearest '(opencode . "s3"))))))
 
 (ert-deftest roster-delete-calls-do-delete ()
-  (let (deleted)
+  (let (deleted reloaded)
     (roster-test--with-list-buffer
         '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
                :encoded-dir "-a")
@@ -293,14 +411,16 @@ not a buffer line)."
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'roster--do-delete-session)
                  (lambda (s) (push (plist-get s :id) deleted)))
-                ((symbol-function 'revert-buffer) #'ignore)
+                ((symbol-function 'roster--reload-tools)
+                 (lambda (tools) (setq reloaded tools)))
                 ((symbol-function 'recenter) #'ignore))
         (roster-delete)
         (should (equal deleted '("s1")))
+        (should (equal reloaded '(claude)))
         (should (zerop (hash-table-count roster--marked)))))))
 
 (ert-deftest roster-archive-calls-do-archive ()
-  (let (archived-calls)
+  (let (archived-calls reloaded)
     (roster-test--with-list-buffer
         '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
                :encoded-dir "-a"))
@@ -308,10 +428,12 @@ not a buffer line)."
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'roster--do-archive-session)
                  (lambda (s a) (push (cons (plist-get s :id) a) archived-calls)))
-                ((symbol-function 'revert-buffer) #'ignore))
+                ((symbol-function 'roster--reload-tools)
+                 (lambda (tools) (setq reloaded tools))))
         (roster-archive)
         ;; s1 is active (no :time-archived), so it should be archived (t)
         (should (equal archived-calls '(("s1" . t))))
+        (should (equal reloaded '(claude)))
         (should (zerop (hash-table-count roster--marked)))))))
 
 ;;; Utilities

@@ -29,15 +29,21 @@
 
 ;;; Tool helpers
 
-(defun roster--load-sessions ()
-  "Return sessions from all enabled tools as a unified list, newest-first."
+(defun roster--load-tool-sessions (tool include-archived)
+  "Load TOOL sessions, optionally including archived sessions."
+  (roster--backend-call (roster--backend tool)
+                        #'roster-backend-load "session loading"
+                        include-archived))
+
+(defun roster--load-sessions (&optional include-archived)
+  "Return enabled-tool sessions as a unified list, newest-first.
+Load archived sessions when INCLUDE-ARCHIVED or `roster-show-archived' is non-nil."
   (roster--sort-sessions
    (seq-mapcat
     (lambda (tool)
       (condition-case err
-          (roster--backend-call (roster--backend tool)
-                                #'roster-backend-load "session loading"
-                                roster-show-archived)
+          (roster--load-tool-sessions
+           tool (or include-archived roster-show-archived))
         (error (message "roster: %s sessions unavailable: %s"
                         tool (error-message-string err))
                nil)))
@@ -145,12 +151,9 @@ TERMINAL-FUNCTION overrides `roster-terminal-function' when non-nil."
 
 (defun roster--visible-sessions ()
   "Return sessions for the current `roster' list buffer."
-  (unless roster-source-function
-    (user-error "No session source configured for this roster buffer"))
-  (let ((sessions (funcall roster-source-function)))
-    (if roster-show-archived
-        sessions
-      (roster--active-sessions sessions))))
+  (if roster-show-archived
+      roster--all-sessions
+    (roster--active-sessions roster--all-sessions)))
 
 (defun roster--entry (session)
   "Build one tabulated list entry for SESSION."
@@ -167,10 +170,55 @@ TERMINAL-FUNCTION overrides `roster-terminal-function' when non-nil."
            (propertize (roster--format-time-millis (plist-get session :time-updated))
                        'face 'roster-time-face)))))
 
-(defun roster--populate ()
-  "Refresh `tabulated-list-entries' for the current `roster' buffer."
+(defun roster--render-sessions ()
+  "Build visible session state from the current loaded snapshot."
   (setq roster--sessions (roster--visible-sessions)
         tabulated-list-entries (mapcar #'roster--entry roster--sessions)))
+
+(defun roster--populate ()
+  "Reload the current roster source and rebuild its visible entries."
+  (unless roster-source-function
+    (user-error "No session source configured for this roster buffer"))
+  (let ((include-archived
+         (or (not roster-backend-source-p)
+             roster-show-archived
+             roster--snapshot-includes-archived)))
+    (setq roster--all-sessions
+          (funcall roster-session-filter-function
+                   (if roster-backend-source-p
+                       (funcall roster-source-function include-archived)
+                     (funcall roster-source-function)))
+          roster--snapshot-includes-archived include-archived))
+  (roster--render-sessions))
+
+(defun roster--redisplay-sessions ()
+  "Render the loaded snapshot without consulting any backend."
+  (roster--render-sessions)
+  (tabulated-list-print t)
+  (roster--apply-marks))
+
+(defun roster--reload-tools (tools)
+  "Reload TOOLS in the current snapshot, preserving other backend results."
+  (if (not roster-backend-source-p)
+      (progn
+        (tabulated-list-revert)
+        (roster--apply-marks))
+    (dolist (tool (seq-uniq tools #'eq))
+      (condition-case err
+          (let ((sessions
+                 (roster--load-tool-sessions
+                  tool roster--snapshot-includes-archived)))
+            (setq roster--all-sessions
+                  (append
+                   (seq-remove (lambda (session)
+                                 (eq (roster--session-tool session) tool))
+                               roster--all-sessions)
+                   (funcall roster-session-filter-function sessions))))
+        (error
+         (message "roster: %s refresh failed; showing local result: %s"
+                  tool (error-message-string err)))))
+    (setq roster--all-sessions (roster--sort-sessions roster--all-sessions))
+    (roster--redisplay-sessions)))
 
 (defun roster--session-at-point ()
   "Return the session at point in a `roster-mode' buffer."
@@ -180,9 +228,12 @@ TERMINAL-FUNCTION overrides `roster-terminal-function' when non-nil."
     (or (roster--session-by-key session-key)
         (user-error "Session %s no longer exists" (cdr session-key)))))
 
-(defun roster-refresh ()
-  "Refresh the current `roster' list buffer."
-  (interactive)
+(defun roster-refresh (&optional hard)
+  "Refresh the current roster list buffer.
+With prefix argument HARD, clear backend caches before reloading."
+  (interactive "P")
+  (when hard
+    (run-hooks 'roster-clear-caches-hook))
   (revert-buffer)
   (roster--apply-marks))
 
@@ -190,7 +241,13 @@ TERMINAL-FUNCTION overrides `roster-terminal-function' when non-nil."
   "Toggle whether archived sessions are shown in the current list."
   (interactive)
   (setq roster-show-archived (not roster-show-archived))
-  (tabulated-list-revert)
+  (if (and roster-show-archived
+           roster-backend-source-p
+           (not roster--snapshot-includes-archived))
+      (progn
+        (tabulated-list-revert)
+        (roster--apply-marks))
+    (roster--redisplay-sessions))
   (message "%s archived sessions"
            (if roster-show-archived "Showing" "Hiding")))
 
@@ -214,27 +271,32 @@ With a prefix ARG, open the session directory in Dired first."
 (defun roster-rename ()
   "Rename the session on the current line."
   (interactive)
-  (when (roster--rename-session-command (roster--session-at-point))
-    (tabulated-list-revert)))
+  (let ((session (roster--session-at-point)))
+    (when (roster--rename-session-command session)
+      (roster--reload-tools (list (roster--session-tool session))))))
 
 (defun roster--toggle-archive-at-point ()
   "Toggle archived state for the session on the current line."
   (let* ((session (roster--session-at-point))
          (archived (not (roster--session-archived-p session))))
     (when (roster--set-archived-command session archived)
-      (tabulated-list-revert))))
+      (roster--reload-tools (list (roster--session-tool session))))))
 
 (defun roster-move-directory ()
   "Move the session on the current line to another project directory."
   (interactive)
-  (when (roster--move-session-command (roster--session-at-point))
-    (tabulated-list-revert)))
+  (let ((session (roster--session-at-point)))
+    (when (roster--move-session-command session)
+      (roster--reload-tools (list (roster--session-tool session))))))
 
 (defun roster--delete-at-point ()
   "Delete the session on the current line."
-  (let ((line (line-number-at-pos)))
-    (when (roster--delete-session-command (roster--session-at-point))
-      (tabulated-list-revert)
+  (let ((line (line-number-at-pos))
+        (session (roster--session-at-point)))
+    (when (roster--delete-session-command session)
+      (setq roster--all-sessions
+            (delq session roster--all-sessions))
+      (roster--reload-tools (list (roster--session-tool session)))
       (goto-char (point-min))
       (forward-line (max 0 (1- line)))
       (when (eobp)
@@ -403,15 +465,19 @@ If no sessions are marked, delete the session on the current line."
         (roster--delete-at-point)
       (when (yes-or-no-p (format "Delete %d marked sessions? " (length keys)))
         (let* ((sessions (seq-keep #'roster--session-by-key keys))
+               (tools (mapcar #'roster--session-tool sessions))
                ;; Capture the visual row offset of point within the window so
                ;; we can `recenter' to the same screen position after refresh.
                (win-line (count-screen-lines (window-start) (point)))
                (target-id (roster--nearest-surviving-session keys)))
           (roster--for-each-session-by-backend
            #'roster--do-delete-session sessions)
+          (setq roster--all-sessions
+                (seq-remove (lambda (session)
+                              (member (roster--session-key session) keys))
+                            roster--all-sessions))
           (roster--clear-marks)
-          (revert-buffer)
-          (roster--apply-marks)
+          (roster--reload-tools tools)
           (when-let ((ln (roster--line-of-session target-id)))
             (goto-char (point-min))
             (forward-line (1- ln))
@@ -426,6 +492,7 @@ If no sessions are marked, toggle the session on the current line."
     (if (null keys)
         (roster--toggle-archive-at-point)
       (let* ((sessions (seq-keep #'roster--session-by-key keys))
+             (tools (mapcar #'roster--session-tool sessions))
              (n-archive   (seq-count (lambda (s) (not (roster--session-archived-p s))) sessions))
              (n-unarchive (seq-count #'roster--session-archived-p sessions))
              (verb (cond ((zerop n-unarchive) "Archive")
@@ -439,12 +506,15 @@ If no sessions are marked, toggle the session on the current line."
                  (target-id (roster--nearest-surviving-session keys)))
             (roster--for-each-session-by-backend
              (lambda (session)
-               (roster--do-archive-session
-                session (not (roster--session-archived-p session))))
+               (let ((archived (not (roster--session-archived-p session))))
+                 (roster--do-archive-session session archived)
+                 (plist-put session :time-archived
+                            (and archived
+                                 (floor (* roster--ms-per-second
+                                           (float-time)))))))
              sessions)
             (roster--clear-marks)
-            (revert-buffer)
-            (roster--apply-marks)
+            (roster--reload-tools tools)
             (when-let ((ln (roster--line-of-session target-id)))
               (goto-char (point-min))
               (forward-line (1- ln))
@@ -479,6 +549,8 @@ If no sessions are marked, toggle the session on the current line."
   (setq-local roster--marked (make-hash-table :test #'equal))
   (setq-local roster--mark-overlays (make-hash-table :test #'equal))
   (setq-local roster--sessions nil)
+  (setq-local roster--all-sessions nil)
+  (setq-local roster--snapshot-includes-archived nil)
   (setq tabulated-list-format [("Title"     28 t)
                                ("Tool"       4 t)
                                ("State"     10 t)
@@ -490,14 +562,21 @@ If no sessions are marked, toggle the session on the current line."
   (add-hook 'tabulated-list-revert-hook #'roster--populate nil t)
   (tabulated-list-init-header))
 
-(defun roster--open-buffer (buffer-name source-function &optional include-archived)
+(defun roster--open-buffer (buffer-name source-function &optional include-archived
+                                        filter-function backend-source-p)
   "Open a `roster' list BUFFER-NAME using SOURCE-FUNCTION.
 When INCLUDE-ARCHIVED is non-nil, archived sessions are shown initially.
-When omitted or nil, the value of `roster-include-archived' is used."
+When omitted or nil, the value of `roster-include-archived' is used.
+FILTER-FUNCTION optionally limits the loaded snapshot for a specialized view.
+BACKEND-SOURCE-P means SOURCE-FUNCTION accepts an include-archived argument
+and supports tool-specific reloads."
   (let ((buffer (get-buffer-create buffer-name)))
     (with-current-buffer buffer
       (roster-mode)
       (setq-local roster-source-function source-function)
+      (setq-local roster-session-filter-function
+                  (or filter-function #'identity))
+      (setq-local roster-backend-source-p backend-source-p)
       (setq-local roster-show-archived (if (null include-archived)
                                            roster-include-archived
                                          include-archived))
@@ -517,6 +596,7 @@ When omitted or nil, the value of `roster-include-archived' is used."
           nil)
       (roster--session-backend-call
        session #'roster-backend-rename "rename" new-title)
+      (plist-put session :title new-title)
       (message "Renamed session %s to %s" session-id new-title)
       t)))
 
@@ -528,6 +608,9 @@ When omitted or nil, the value of `roster-include-archived' is used."
          (past (if archived "Archived" "Unarchived")))
     (when (yes-or-no-p (format "%s session '%s' (%s)? " verb title session-id))
       (roster--do-archive-session session archived)
+      (plist-put session :time-archived
+                 (and archived
+                      (floor (* roster--ms-per-second (float-time)))))
       (message "%s session %s" past session-id)
       t)))
 
@@ -553,8 +636,12 @@ When omitted or nil, the value of `roster-include-archived' is used."
 
 (defun roster--move-session-command (session)
   "Move SESSION using its backend capability."
-  (roster--session-backend-call
-   session #'roster-backend-move "directory moves"))
+  (let ((directory
+         (roster--session-backend-call
+          session #'roster-backend-move "directory moves")))
+    (when (stringp directory)
+      (plist-put session :directory directory))
+    directory))
 
 ;;; Public commands
 
@@ -562,7 +649,8 @@ When omitted or nil, the value of `roster-include-archived' is used."
 (defun roster ()
   "Open a Dired-like buffer for managing sessions."
   (interactive)
-  (roster--open-buffer roster-buffer-name #'roster--load-sessions))
+  (roster--open-buffer roster-buffer-name
+                       #'roster--load-sessions nil nil t))
 
 ;;;###autoload
 (defun roster-project ()
@@ -571,8 +659,10 @@ When omitted or nil, the value of `roster-include-archived' is used."
   (let ((scope (roster--project-scope-directory)))
     (roster--open-buffer
      (format "%s<%s>" roster-buffer-name (file-name-nondirectory (directory-file-name scope)))
-     (lambda ()
-       (roster--project-scoped-sessions (roster--load-sessions))))))
+     #'roster--load-sessions
+     nil
+     #'roster--project-scoped-sessions
+     t)))
 
 (provide 'roster)
 

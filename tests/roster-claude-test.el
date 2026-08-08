@@ -95,6 +95,78 @@
               (should (equal (plist-get meta :ai-title) "Latest AI title")))))
       (delete-file path))))
 
+(ert-deftest roster-claude-transcript-cache-invalidates-after-append ()
+  "Unchanged transcripts are reused, while appended records are reparsed."
+  (let ((path (make-temp-file "roster-claude-" nil ".jsonl"))
+        (roster--claude-transcript-cache (make-hash-table :test #'equal))
+        (reads 0)
+        (insert-file-contents-original (symbol-function 'insert-file-contents)))
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert (concat
+                     "{\"type\":\"user\",\"cwd\":\"/tmp/claude\","
+                     "\"message\":{\"content\":\"First prompt\"}}\n")))
+          (cl-letf (((symbol-function 'insert-file-contents)
+                     (lambda (&rest arguments)
+                       (cl-incf reads)
+                       (apply insert-file-contents-original arguments))))
+            (should (equal (plist-get (roster--claude-parse-jsonl path)
+                                      :title-candidate)
+                           "First prompt"))
+            (should (equal (plist-get (roster--claude-parse-jsonl path)
+                                      :title-candidate)
+                           "First prompt"))
+            (should (= reads 1))
+            (with-temp-buffer
+              (insert "{\"type\":\"custom-title\",\"customTitle\":\"New title\"}\n")
+              (write-region (point-min) (point-max) path t 'silent))
+            (should (equal (plist-get (roster--claude-parse-jsonl path)
+                                      :custom-title)
+                           "New title"))
+            (should (= reads 2))))
+      (delete-file path))))
+
+(ert-deftest roster-claude-cached-transcript-still-reads-current-sidecar ()
+  "Roster metadata remains fresh when only its small sidecar changes."
+  (let* ((root (make-temp-file "roster-claude-root-" t))
+         (roster-claude-dir root)
+         (roster--claude-transcript-cache (make-hash-table :test #'equal))
+         (path (expand-file-name "cc-1.jsonl" root)))
+    (unwind-protect
+        (progn
+          (with-temp-file path
+            (insert (concat
+                     "{\"type\":\"user\",\"cwd\":\"/tmp/claude\","
+                     "\"message\":{\"content\":\"First prompt\"}}\n")))
+          (should (equal (plist-get (roster--claude-session-from-file "-tmp" path)
+                                    :title)
+                         "First prompt"))
+          (roster--claude-write-sidecar "cc-1" "Sidecar title" 123)
+          (let ((session (roster--claude-session-from-file "-tmp" path)))
+            (should (equal (plist-get session :title) "Sidecar title"))
+            (should (= (plist-get session :time-archived) 123))))
+      (delete-directory root t))))
+
+(ert-deftest roster-claude-transcript-cache-prunes-removed-files ()
+  (let* ((root (make-temp-file "roster-claude-root-" t))
+         (roster-claude-dir root)
+         (roster-claude-use-agent-sdk nil)
+         (roster--claude-transcript-cache (make-hash-table :test #'equal))
+         (session-dir (expand-file-name "projects/-tmp-proj" root))
+         (path (expand-file-name "cc-1.jsonl" session-dir)))
+    (unwind-protect
+        (progn
+          (make-directory session-dir t)
+          (with-temp-file path
+            (insert "{\"type\":\"user\",\"cwd\":\"/tmp/proj\"}\n"))
+          (roster--claude-load-sessions-from-transcripts t)
+          (should (= (hash-table-count roster--claude-transcript-cache) 1))
+          (delete-file path)
+          (roster--claude-load-sessions-from-transcripts t)
+          (should (zerop (hash-table-count roster--claude-transcript-cache))))
+      (delete-directory root t))))
+
 (ert-deftest roster-claude-archive-preserves-sidecar-title ()
   (let* ((root (make-temp-file "roster-claude-root-" t))
          (roster-claude-dir root)

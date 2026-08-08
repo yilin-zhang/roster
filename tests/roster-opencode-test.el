@@ -14,6 +14,46 @@
     (should (equal (roster--opencode-server-url (current-buffer))
                    "http://127.0.0.1:12345"))))
 
+(ert-deftest roster-opencode-call-with-server-reuses-ready-process ()
+  (let ((ready nil)
+        (starts 0)
+        (touches 0)
+        (roster--opencode-idle-timer nil)
+        (roster--opencode-use-depth 0))
+    (cl-letf (((symbol-function 'roster--opencode-server-ready-p)
+               (lambda () ready))
+              ((symbol-function 'roster--opencode-start-server)
+               (lambda () (cl-incf starts) (setq ready t)))
+              ((symbol-function 'roster--opencode-trim-output) #'ignore)
+              ((symbol-function 'roster--opencode-touch-server)
+               (lambda () (cl-incf touches))))
+      (should (eq (roster--opencode-call-with-server (lambda () 'first))
+                  'first))
+      (should (eq (roster--opencode-call-with-server (lambda () 'second))
+                  'second))
+      (should (= starts 1))
+      (should (= touches 2)))))
+
+(ert-deftest roster-opencode-nested-server-calls-manage-one-idle-window ()
+  (let ((touches 0)
+        (roster--opencode-idle-timer
+         (run-at-time 3600 nil #'ignore))
+        (roster--opencode-use-depth 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'roster--opencode-server-ready-p)
+                   (lambda () t))
+                  ((symbol-function 'roster--opencode-trim-output) #'ignore)
+                  ((symbol-function 'roster--opencode-touch-server)
+                   (lambda () (cl-incf touches))))
+          (roster--opencode-call-with-server
+           (lambda ()
+             (should-not roster--opencode-idle-timer)
+             (roster--opencode-call-with-server
+              (lambda () (should (= roster--opencode-use-depth 2))))))
+          (should (= touches 1))
+          (should (zerop roster--opencode-use-depth)))
+      (roster--opencode-cancel-idle-timer))))
+
 (ert-deftest roster-opencode-query-string-encodes-values ()
   (should (equal (roster--opencode-query-string
                   '(("roots" . "true") ("directory" . "/tmp/a b") ("cursor")))
