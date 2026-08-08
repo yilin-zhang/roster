@@ -37,7 +37,8 @@
 
 (defun roster--load-sessions (&optional include-archived)
   "Return enabled-tool sessions as a unified list, newest-first.
-Load archived sessions when INCLUDE-ARCHIVED or `roster-show-archived' is non-nil."
+Load archived sessions when INCLUDE-ARCHIVED or `roster-show-archived'
+is non-nil."
   (roster--sort-sessions
    (seq-mapcat
     (lambda (tool)
