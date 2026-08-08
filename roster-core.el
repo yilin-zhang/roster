@@ -311,12 +311,18 @@ TITLE and TIME-ARCHIVED may be nil; nil fields are omitted."
 (defun roster--read-json (string)
   "Parse JSON STRING as a plist, or return nil on failure."
   (condition-case nil
-      (let ((json-object-type 'plist)
-            (json-key-type 'keyword)
-            (json-array-type 'list)
-            (json-null nil)
-            (json-false nil))
-        (json-read-from-string string))
+      (if (json-available-p)
+          (json-parse-string string
+                             :object-type 'plist
+                             :array-type 'list
+                             :null-object nil
+                             :false-object nil)
+        (let ((json-object-type 'plist)
+              (json-key-type 'keyword)
+              (json-array-type 'list)
+              (json-null nil)
+              (json-false nil))
+          (json-read-from-string string)))
     (error nil)))
 
 (defun roster--content-text (content)

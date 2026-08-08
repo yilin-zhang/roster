@@ -46,30 +46,63 @@ the SDK and nil always uses the compatibility implementation."
                     (file-name-directory (or load-file-name buffer-file-name)))
   "Path to roster's Claude Agent SDK bridge.")
 
+(defvar roster--claude-sdk-unavailable-key nil
+  "SDK configuration known to be unavailable in `auto' mode.")
+
+(defun roster--claude-sdk-cache-key ()
+  "Return the configuration key used for SDK availability caching."
+  (list roster-claude-python-command roster--claude-sdk-script))
+
+(defun roster--claude-reset-sdk-cache ()
+  "Forget a cached negative Claude Agent SDK availability result."
+  (interactive)
+  (setq roster--claude-sdk-unavailable-key nil)
+  (when (called-interactively-p 'interactive)
+    (message "Reset roster's Claude Agent SDK availability cache")))
+
 (defun roster--claude-sdk-call (&rest arguments)
   "Call the Claude Agent SDK bridge with ARGUMENTS and return its result."
-  (condition-case err
-      (with-temp-buffer
-        (let ((process-environment
-               (cons (concat "CLAUDE_CONFIG_DIR=" roster-claude-dir)
-                     process-environment))
-              (status (apply #'call-process roster-claude-python-command nil t nil
-                             roster--claude-sdk-script arguments)))
-          (let ((result (roster--read-json (string-trim (buffer-string)))))
-            (cond
-             ((not (plist-get result :available))
-              (when (eq roster-claude-use-agent-sdk t)
-                (user-error "claude-agent-sdk is not installed"))
-              nil)
-             ((not (eq status 0))
-              (user-error "Claude Agent SDK error: %s"
-                          (or (plist-get result :error) "unknown error")))
-             (t result)))))
-    (file-missing
-     (when (eq roster-claude-use-agent-sdk t)
-       (user-error "Cannot run Claude Agent SDK bridge: %s"
-                   (error-message-string err)))
-     nil)))
+  (let ((cache-key (roster--claude-sdk-cache-key)))
+    (unless (and (eq roster-claude-use-agent-sdk 'auto)
+                 (equal roster--claude-sdk-unavailable-key cache-key))
+      (condition-case err
+          (with-temp-buffer
+            (let ((process-environment
+                   (cons (concat "CLAUDE_CONFIG_DIR=" roster-claude-dir)
+                         process-environment))
+                  (status (apply #'call-process roster-claude-python-command nil t nil
+                                 roster--claude-sdk-script arguments)))
+              (let ((result (roster--read-json (string-trim (buffer-string)))))
+                (cond
+                 ((and (plist-member result :available)
+                       (not (plist-get result :available)))
+                  (when (eq roster-claude-use-agent-sdk 'auto)
+                    (setq roster--claude-sdk-unavailable-key cache-key))
+                  (when (eq roster-claude-use-agent-sdk t)
+                    (user-error "claude-agent-sdk is not installed"))
+                  nil)
+                 ((not (eq status 0))
+                  (user-error "Claude Agent SDK error: %s"
+                              (or (plist-get result :error) "unknown error")))
+                 (t
+                  (setq roster--claude-sdk-unavailable-key nil)
+                  result)))))
+        (file-missing
+         (when (eq roster-claude-use-agent-sdk 'auto)
+           (setq roster--claude-sdk-unavailable-key cache-key))
+         (when (eq roster-claude-use-agent-sdk t)
+           (user-error "Cannot run Claude Agent SDK bridge: %s"
+                       (error-message-string err)))
+         nil)))))
+
+(defconst roster--claude-cli-entrypoint "cli"
+  "Value of a Claude transcript's `entrypoint' field for interactive sessions.
+Sessions started through the Claude Agent SDK instead of the CLI record
+another value (e.g. \"sdk-py\").  Those are spawned by tooling rather than
+by the user, and cannot be resumed with `claude -r', so roster hides them.")
+
+(defconst roster--claude-entrypoint-read-size 65536
+  "Maximum number of transcript bytes read when checking its entrypoint.")
 
 (defun roster--claude-jsonl-files (projects-dir)
   "Return `(ENCODED-DIR . PATH)' pairs for Claude JSONL files in PROJECTS-DIR.
@@ -79,6 +112,12 @@ used later as the key for sidecar files."
   ;; Compatibility fallback: Claude Agent SDK is a separate optional install,
   ;; so roster retains support for Claude's documented transcript location.
   ;; Remove this parser only if the SDK ships with the Claude Code CLI itself.
+  ;;
+  ;; This listing is deliberately non-recursive.  Transcripts of Task-tool
+  ;; subagents live one level deeper, in "<encoded-dir>/<session-id>/subagents/",
+  ;; and are not sessions the user can resume or rename.  Never turn this into
+  ;; `directory-files-recursively' -- that would list every subagent as a
+  ;; top-level session.
   (let (result)
     (dolist (encoded-dir (directory-files projects-dir nil "^[^.]"))
       (let ((dir-path (expand-file-name encoded-dir projects-dir)))
@@ -132,15 +171,24 @@ Preserve roster's archive state, which Claude has no native equivalent for."
     (when sidecar
       (roster--claude-write-sidecar session-id nil time-archived))))
 
-(defun roster--claude-update-meta-from-object (obj slug cwd title-candidate)
+(defun roster--claude-update-meta-from-object (obj slug cwd title-candidate
+                                                   entrypoint)
   "Update Claude metadata from OBJ.
-Return a plist with keys :slug, :cwd, and :title-candidate.
+Return a plist with keys :slug, :cwd, :title-candidate, and :entrypoint.
 Called once per JSONL line; treats the accumulator values (SLUG, CWD,
-TITLE-CANDIDATE) as immutable — returns updated copies without mutation,
-so the caller can pattern-match the result and rebind all three at once."
+TITLE-CANDIDATE, ENTRYPOINT) as immutable — returns updated copies without
+mutation, so the caller can pattern-match the result and rebind all four at
+once."
   (let ((new-slug (or slug (plist-get obj :slug)))
         (new-cwd cwd)
-        (new-title title-candidate))
+        (new-title title-candidate)
+        (new-entrypoint entrypoint))
+    ;; `entrypoint' is stamped on every message-bearing record, not just on
+    ;; user turns, so read it before narrowing to "user".
+    (unless new-entrypoint
+      (let ((value (plist-get obj :entrypoint)))
+        (when (and (stringp value) (not (string-empty-p value)))
+          (setq new-entrypoint value))))
     (when (equal (plist-get obj :type) "user")
       (unless new-cwd
         (let ((value (plist-get obj :cwd)))
@@ -156,34 +204,8 @@ so the caller can pattern-match the result and rebind all three at once."
             (setq new-title text)))))
     (list :slug new-slug
           :cwd new-cwd
-          :title-candidate new-title)))
-
-(defun roster--claude-recorded-titles (path)
-  "Return the latest explicit and generated titles recorded at PATH."
-  (condition-case nil
-      (with-temp-buffer
-        (insert-file-contents path)
-        (goto-char (point-max))
-        (let (custom-title ai-title)
-          (while (and (not (bobp))
-                      (not (and custom-title ai-title)))
-            (forward-line -1)
-            (let* ((line (buffer-substring-no-properties
-                          (line-beginning-position) (line-end-position)))
-                   (obj (roster--read-json line)))
-              (pcase (plist-get obj :type)
-                ("custom-title"
-                 (unless custom-title
-                   (let ((value (plist-get obj :customTitle)))
-                     (when (and (stringp value) (not (string-empty-p value)))
-                       (setq custom-title value)))))
-                ("ai-title"
-                 (unless ai-title
-                   (let ((value (plist-get obj :aiTitle)))
-                     (when (and (stringp value) (not (string-empty-p value)))
-                       (setq ai-title value))))))))
-          (list :custom-title custom-title :ai-title ai-title)))
-    (error nil)))
+          :title-candidate new-title
+          :entrypoint new-entrypoint)))
 
 (defun roster--claude-title (meta sidecar)
   "Return display title derived from META and SIDECAR."
@@ -200,11 +222,44 @@ so the caller can pattern-match the result and rebind all three at once."
           (roster--truncate-title candidate))
         roster--untitled)))
 
+(defun roster--claude-cli-session-p (meta)
+  "Return non-nil when META describes an interactive Claude CLI session.
+Transcripts written by the Claude Agent SDK -- headless runs spawned by
+tooling, such as a `/security-review' subagent -- land beside real sessions
+in the projects directory but are not resumable, so roster hides them.
+Transcripts predating the `entrypoint' field record nothing and are kept."
+  (let ((entrypoint (plist-get meta :entrypoint)))
+    (or (null entrypoint)
+        (equal entrypoint roster--claude-cli-entrypoint))))
+
+(defun roster--claude-transcript-entrypoint (path)
+  "Return the first non-empty `entrypoint' recorded near the start of PATH.
+Only a bounded prefix is read so filtering SDK results does not require
+loading large transcripts in full.  Return nil on missing, malformed, or
+legacy transcripts; callers deliberately keep those sessions visible."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents path nil 0 roster--claude-entrypoint-read-size)
+        (goto-char (point-min))
+        (catch 'entrypoint
+          (while (not (eobp))
+            (let* ((line (buffer-substring-no-properties
+                          (point) (line-end-position)))
+                   (obj (roster--read-json line))
+                   (entrypoint (plist-get obj :entrypoint)))
+              (when (and (stringp entrypoint)
+                         (not (string-empty-p entrypoint)))
+                (throw 'entrypoint entrypoint)))
+            (forward-line 1))
+          nil))
+    (error nil)))
+
 (defun roster--claude-session-from-file (encoded-dir path)
-  "Return unified Claude session plist for ENCODED-DIR and JSONL file at PATH."
+  "Return unified Claude session plist for ENCODED-DIR and JSONL file at PATH.
+Return nil when PATH is not an interactive CLI session transcript."
   (let* ((session-id (file-name-sans-extension (file-name-nondirectory path)))
          (meta (roster--claude-parse-jsonl path)))
-    (when meta
+    (when (and meta (roster--claude-cli-session-p meta))
       (let* ((sidecar (roster--claude-read-sidecar session-id))
              (cwd (plist-get meta :cwd))
              (time-archived (let ((value (cdr (assoc "time_archived" sidecar))))
@@ -221,26 +276,36 @@ so the caller can pattern-match the result and rebind all three at once."
 
 (defun roster--claude-parse-jsonl (path)
   "Return metadata plist from a Claude Code JSONL file at PATH.
-Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
-:ai-title, and :time-updated (file mtime in milliseconds)."
+Returns plist with keys :slug, :cwd, :title-candidate, :entrypoint,
+:custom-title, :ai-title, and :time-updated (file mtime in milliseconds)."
   (condition-case nil
-      (let (slug cwd title-candidate)
+      (let (slug cwd title-candidate entrypoint custom-title ai-title)
         (with-temp-buffer
           (insert-file-contents path)
           (goto-char (point-min))
-          (while (and (not (eobp))
-                      (not (and slug cwd title-candidate)))
+          (while (not (eobp))
             (let* ((line (buffer-substring-no-properties (point) (line-end-position)))
                    (obj (roster--read-json line)))
               (when obj
-                (pcase-let ((`(:slug ,new-slug :cwd ,new-cwd :title-candidate ,new-title)
-                             (roster--claude-update-meta-from-object obj slug cwd title-candidate)))
+                (pcase-let ((`(:slug ,new-slug :cwd ,new-cwd :title-candidate ,new-title
+                                     :entrypoint ,new-entrypoint)
+                             (roster--claude-update-meta-from-object
+                              obj slug cwd title-candidate entrypoint)))
                   (setq slug new-slug
                         cwd new-cwd
-                        title-candidate new-title))))
+                        title-candidate new-title
+                        entrypoint new-entrypoint))
+                (pcase (plist-get obj :type)
+                  ("custom-title"
+                   (let ((value (plist-get obj :customTitle)))
+                     (when (and (stringp value) (not (string-empty-p value)))
+                       (setq custom-title value))))
+                  ("ai-title"
+                   (let ((value (plist-get obj :aiTitle)))
+                     (when (and (stringp value) (not (string-empty-p value)))
+                       (setq ai-title value)))))))
             (forward-line 1)))
-        (let* ((recorded-titles (roster--claude-recorded-titles path))
-               (attrs (file-attributes path))
+        (let* ((attrs (file-attributes path))
                (mtime (when attrs (file-attribute-modification-time attrs)))
                (time-updated (if mtime
                                  (floor (* roster--ms-per-second (float-time mtime)))
@@ -248,8 +313,9 @@ Returns plist with keys :slug, :cwd, :title-candidate, :custom-title,
           (list :slug slug
                 :cwd (or cwd "")
                 :title-candidate title-candidate
-                :custom-title (plist-get recorded-titles :custom-title)
-                :ai-title (plist-get recorded-titles :ai-title)
+                :entrypoint entrypoint
+                :custom-title custom-title
+                :ai-title ai-title
                 :time-updated time-updated)))
     (error nil)))
 
@@ -281,24 +347,46 @@ INCLUDE-ARCHIVED controls roster's sidecar archive metadata."
           :time-archived (and (numberp time-archived) time-archived)
           :tool 'claude)))
 
+(defun roster--claude-sdk-session-resumable-p (value)
+  "Return non-nil when SDK session VALUE can be resumed by Claude CLI.
+The Agent SDK's `list_sessions' includes all top-level transcripts without
+exposing their entrypoint, so consult the corresponding transcript when it
+is available.  Missing and legacy transcripts are kept for compatibility."
+  (let ((path (roster--claude-find-transcript (plist-get value :id))))
+    (or (null path)
+        (roster--claude-cli-session-p
+         (list :entrypoint (roster--claude-transcript-entrypoint path))))))
+
 (defun roster--claude-load-sessions (&optional include-archived)
   "Return Claude Code sessions, optionally INCLUDE-ARCHIVED sessions."
   (let* ((sdk-result (when roster-claude-use-agent-sdk
                        (roster--claude-sdk-call "list")))
          (sessions
           (if sdk-result
-              (mapcar #'roster--claude-session-from-sdk
-                      (plist-get sdk-result :sessions))
+              (delq nil
+                    (mapcar (lambda (value)
+                              (when (roster--claude-sdk-session-resumable-p value)
+                                (roster--claude-session-from-sdk value)))
+                            (plist-get sdk-result :sessions)))
             (roster--claude-load-sessions-from-transcripts t))))
     (if include-archived sessions (roster--active-sessions sessions))))
 
 (defun roster--claude-find-transcript (session-id)
-  "Return transcript path for Claude SESSION-ID, or nil."
-  (let ((projects-dir (roster--claude-projects-dir)))
+  "Return transcript path for Claude SESSION-ID, or nil.
+Only project directories are searched, never their nested \"subagents\"
+directories: a subagent transcript is not a session and must never be
+reachable by a delete or rename that names a session id."
+  (let ((projects-dir (roster--claude-projects-dir))
+        (fname (concat session-id ".jsonl"))
+        found)
     (when (file-directory-p projects-dir)
-      (car (directory-files-recursively
-            projects-dir
-            (concat "\\(?:^\\|/\\)" (regexp-quote session-id) "\\.jsonl\\'"))))))
+      (dolist (encoded-dir (directory-files projects-dir nil "^[^.]"))
+        (unless found
+          (let ((path (expand-file-name
+                       fname (expand-file-name encoded-dir projects-dir))))
+            (when (file-regular-p path)
+              (setq found path))))))
+    found))
 
 (defun roster--claude-delete-session (session)
   "Delete a Claude Code SESSION's JSONL file and roster sidecar."
