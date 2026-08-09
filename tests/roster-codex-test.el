@@ -99,6 +99,22 @@
                    '("thread/delete" ("threadId" . "cx-1"))))
     (should (equal deleted-id "cx-1"))))
 
+(ert-deftest roster-codex-delete-explains-active-writer ()
+  (let (sidecar-deleted)
+    (cl-letf (((symbol-function 'roster--codex-app-server-request)
+               (lambda (_method _params)
+                 (user-error
+                  "Codex app-server error: thread cx-1 already has an active writer")))
+              ((symbol-function 'roster--codex-delete-legacy-sidecar)
+               (lambda (_session-id) (setq sidecar-deleted t))))
+      (let ((err (should-error
+                  (roster--codex-delete-session '(:id "cx-1"))
+                  :type 'user-error)))
+        (should (equal (error-message-string err)
+                       (concat "Codex session cx-1 is still open; "
+                               "close its Codex client, then retry")))))
+    (should-not sidecar-deleted)))
+
 (ert-deftest roster-codex-archive-uses-native-api ()
   (let (requests)
     (cl-letf (((symbol-function 'roster--codex-app-server-request)

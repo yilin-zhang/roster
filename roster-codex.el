@@ -248,8 +248,16 @@ Include archived threads only when INCLUDE-ARCHIVED is non-nil."
 (defun roster--codex-delete-session (session)
   "Delete Codex SESSION through app-server."
   (let ((session-id (plist-get session :id)))
-    (roster--codex-app-server-request
-     "thread/delete" `(("threadId" . ,session-id)))
+    (condition-case err
+        (roster--codex-app-server-request
+         "thread/delete" `(("threadId" . ,session-id)))
+      (user-error
+       (if (string-match-p "already has an active writer"
+                           (error-message-string err))
+           (user-error
+            "Codex session %s is still open; close its Codex client, then retry"
+            session-id)
+         (signal (car err) (cdr err)))))
     (roster--codex-delete-legacy-sidecar session-id)))
 
 (defun roster--codex-rename-session (session new-title)
