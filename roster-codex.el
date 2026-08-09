@@ -10,7 +10,7 @@
 (require 'cl-lib)
 
 (defface roster-tool-codex-face
-  `((t :foreground ,(face-attribute 'ansi-color-green :foreground)))
+  '((t :inherit success))
   "Face for the Codex tool tag in `roster' lists."
   :group 'roster)
 

@@ -11,7 +11,7 @@
 ;;; Claude Code backend
 
 (defface roster-tool-claude-face
-  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
+  '((t :inherit font-lock-type-face))
   "Face for the Claude Code tool tag in `roster' lists."
   :group 'roster)
 

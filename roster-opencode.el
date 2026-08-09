@@ -14,7 +14,7 @@
 ;;; OpenCode backend
 
 (defface roster-tool-opencode-face
-  `((t :foreground ,(face-attribute 'ansi-color-blue :foreground)))
+  '((t :inherit font-lock-keyword-face))
   "Face for the OpenCode tool tag in `roster' lists."
   :group 'roster)
 

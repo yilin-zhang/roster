@@ -393,6 +393,21 @@ jumps as little as possible."
           (forward-line 1))
         line))))
 
+(defun roster--call-restoring-position (function excluded-keys)
+  "Call FUNCTION and restore list position away from EXCLUDED-KEYS."
+  (let* ((window (get-buffer-window (current-buffer) t))
+         (window-line (and window
+                           (count-screen-lines
+                            (window-start window) (point) nil window)))
+         (target-key (roster--nearest-surviving-session excluded-keys)))
+    (funcall function)
+    (when-let ((line (roster--line-of-session target-key)))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (when window
+        (with-selected-window window
+          (recenter window-line))))))
+
 (defun roster-mark ()
   "Toggle mark on the session at point and advance to the next line.
 With an active region, mark all sessions in the region (no toggle)."
@@ -466,23 +481,18 @@ If no sessions are marked, delete the session on the current line."
         (roster--delete-at-point)
       (when (yes-or-no-p (format "Delete %d marked sessions? " (length keys)))
         (let* ((sessions (seq-keep #'roster--session-by-key keys))
-               (tools (mapcar #'roster--session-tool sessions))
-               ;; Capture the visual row offset of point within the window so
-               ;; we can `recenter' to the same screen position after refresh.
-               (win-line (count-screen-lines (window-start) (point)))
-               (target-id (roster--nearest-surviving-session keys)))
-          (roster--for-each-session-by-backend
-           #'roster--do-delete-session sessions)
-          (setq roster--all-sessions
-                (seq-remove (lambda (session)
-                              (member (roster--session-key session) keys))
-                            roster--all-sessions))
-          (roster--clear-marks)
-          (roster--reload-tools tools)
-          (when-let ((ln (roster--line-of-session target-id)))
-            (goto-char (point-min))
-            (forward-line (1- ln))
-            (recenter win-line))
+               (tools (mapcar #'roster--session-tool sessions)))
+          (roster--call-restoring-position
+           (lambda ()
+             (roster--for-each-session-by-backend
+              #'roster--do-delete-session sessions)
+             (setq roster--all-sessions
+                   (seq-remove (lambda (session)
+                                 (member (roster--session-key session) keys))
+                               roster--all-sessions))
+             (roster--clear-marks)
+             (roster--reload-tools tools))
+           keys)
           (message "Deleted %d sessions" (length keys)))))))
 
 (defun roster-archive ()
@@ -503,24 +513,21 @@ If no sessions are marked, toggle the session on the current line."
                          ((zerop n-archive)   "Unarchived")
                          (t "Archived/Unarchived"))))
         (when (yes-or-no-p (format "%s %d marked sessions? " verb (length sessions)))
-          (let* ((win-line (count-screen-lines (window-start) (point)))
-                 (target-id (roster--nearest-surviving-session keys)))
-            (roster--for-each-session-by-backend
-             (lambda (session)
-               (let ((archived (not (roster--session-archived-p session))))
-                 (roster--do-archive-session session archived)
-                 (plist-put session :time-archived
-                            (and archived
-                                 (floor (* roster--ms-per-second
-                                           (float-time)))))))
-             sessions)
-            (roster--clear-marks)
-            (roster--reload-tools tools)
-            (when-let ((ln (roster--line-of-session target-id)))
-              (goto-char (point-min))
-              (forward-line (1- ln))
-              (recenter win-line))
-            (message "%s %d sessions" past (length sessions))))))))
+          (roster--call-restoring-position
+           (lambda ()
+             (roster--for-each-session-by-backend
+              (lambda (session)
+                (let ((archived (not (roster--session-archived-p session))))
+                  (roster--do-archive-session session archived)
+                  (plist-put session :time-archived
+                             (and archived
+                                  (floor (* roster--ms-per-second
+                                            (float-time)))))))
+              sessions)
+             (roster--clear-marks)
+             (roster--reload-tools tools))
+           keys)
+          (message "%s %d sessions" past (length sessions)))))))
 
 ;;; Mode definition
 

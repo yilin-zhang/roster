@@ -403,20 +403,26 @@ not a buffer line)."
 (ert-deftest roster-delete-calls-do-delete ()
   (let (deleted reloaded)
     (roster-test--with-list-buffer
-        '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
+        '((:id "s1" :title "A" :directory "/a" :time-updated 3000 :tool claude
                :encoded-dir "-a")
-          (:id "s2" :title "B" :directory "/b" :time-updated 900 :tool claude
-               :encoded-dir "-b"))
-      (puthash '(claude . "s1") t roster--marked)
+          (:id "s2" :title "B" :directory "/b" :time-updated 2000 :tool claude
+               :encoded-dir "-b")
+          (:id "s3" :title "C" :directory "/c" :time-updated 1000 :tool claude
+               :encoded-dir "-c"))
+      (forward-line 1)
+      (puthash '(claude . "s2") t roster--marked)
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'roster--do-delete-session)
                  (lambda (s) (push (plist-get s :id) deleted)))
                 ((symbol-function 'roster--reload-tools)
-                 (lambda (tools) (setq reloaded tools)))
+                 (lambda (tools)
+                   (setq reloaded tools)
+                   (roster--redisplay-sessions)))
                 ((symbol-function 'recenter) #'ignore))
         (roster-delete)
-        (should (equal deleted '("s1")))
+        (should (equal deleted '("s2")))
         (should (equal reloaded '(claude)))
+        (should (equal (tabulated-list-get-id) '(claude . "s3")))
         (should (zerop (hash-table-count roster--marked)))))))
 
 (ert-deftest roster-archive-calls-do-archive ()
@@ -435,20 +441,6 @@ not a buffer line)."
         (should (equal archived-calls '(("s1" . t))))
         (should (equal reloaded '(claude)))
         (should (zerop (hash-table-count roster--marked)))))))
-
-;;; Utilities
-
-(ert-deftest roster-run-command-falls-back-when-directory-missing ()
-  (let (captured-default-directory)
-    (cl-letf (((symbol-function 'call-process-shell-command)
-               (lambda (_command _in buffer)
-                 (setq captured-default-directory default-directory)
-                 (with-current-buffer (if (eq buffer t) (current-buffer) buffer)
-                   (insert "ok"))
-                 0)))
-      (should (equal (roster--run-command "/tmp/roster-does-not-exist" "true") "ok"))
-      (should (equal captured-default-directory
-                     (file-name-as-directory (expand-file-name "~")))))))
 
 (provide 'roster-ui-test)
 

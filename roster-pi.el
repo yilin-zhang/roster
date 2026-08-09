@@ -11,7 +11,7 @@
 ;;; pi backend
 
 (defface roster-tool-pi-face
-  `((t :foreground ,(face-attribute 'ansi-color-red :foreground)))
+  '((t :inherit error))
   "Face for the pi tool tag in `roster' lists."
   :group 'roster)
 

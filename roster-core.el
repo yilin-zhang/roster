@@ -12,7 +12,6 @@
 (require 'project)
 (require 'tabulated-list)
 (require 'json)
-(require 'ansi-color)
 
 ;; Ghostel is an optional runtime dependency, loaded on demand by
 ;; `roster-open-in-ghostel'.  Declare it so byte compilation stays clean
@@ -133,7 +132,7 @@ capability must be callable when present."
   :group 'roster)
 
 (defface roster-mark-indicator-face
-  `((t :foreground ,(face-attribute 'ansi-color-yellow :foreground)))
+  '((t :inherit warning))
   "Face for the mark indicator character in `roster' lists."
   :group 'roster)
 
@@ -286,24 +285,6 @@ Must be a symbol present in `roster-enabled-tools'."
   (if (roster--session-archived-p session)
       'roster-archived-face
     'roster-active-face))
-
-(defun roster--run-command (directory command)
-  "Run COMMAND in DIRECTORY and return its trimmed stdout.
-Signal a `user-error' when the command exits unsuccessfully."
-  (let* ((dir (expand-file-name directory))
-         (default-directory
-          (file-name-as-directory
-           (if (file-directory-p dir)
-               dir
-             (prog1 (expand-file-name "~")
-               (message "roster: directory %s not found, falling back to ~" dir))))))
-    (with-temp-buffer
-      (let ((status (call-process-shell-command command nil t)))
-        (unless (eq status 0)
-          (user-error "Command failed in %s: %s"
-                      default-directory
-                      (string-trim (buffer-string))))
-        (string-trim (buffer-string))))))
 
 (defun roster--read-sidecar (path)
   "Return roster metadata alist from sidecar file at PATH, or nil."
