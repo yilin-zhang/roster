@@ -206,12 +206,12 @@ Set to zero to keep it alive until Emacs exits."
 (defun roster--opencode-query-string (parameters)
   "Return URL query string for non-nil PARAMETERS."
   (when-let* ((values
-              (seq-keep
-               (lambda (pair)
-                 (when (cdr pair)
-                   (format "%s=%s" (car pair)
-                           (url-hexify-string (format "%s" (cdr pair))))))
-               parameters)))
+               (seq-keep
+                (lambda (pair)
+                  (when (cdr pair)
+                    (format "%s=%s" (car pair)
+                            (url-hexify-string (format "%s" (cdr pair))))))
+                parameters)))
     (concat "?" (string-join values "&"))))
 
 (defun roster--opencode-response (buffer)

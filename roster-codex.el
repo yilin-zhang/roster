@@ -86,8 +86,8 @@ the corresponding sidecar."
       (catch 'response
         (while (not (eobp))
           (when-let* ((obj (roster--read-json
-                           (buffer-substring-no-properties
-                            (point) (line-end-position)))))
+                            (buffer-substring-no-properties
+                             (point) (line-end-position)))))
             (when (equal (plist-get obj :id) request-id)
               (throw 'response obj)))
           (forward-line 1))
