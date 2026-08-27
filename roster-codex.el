@@ -64,7 +64,7 @@ the corresponding sidecar."
         (directory (roster--codex-roster-dir)))
     (when (file-directory-p directory)
       (dolist (path (directory-files directory t "\\.roster\\.json\\'"))
-        (when-let ((title (cdr (assoc "title" (roster--read-sidecar path)))))
+        (when-let* ((title (cdr (assoc "title" (roster--read-sidecar path)))))
           (puthash (string-remove-suffix
                     ".roster.json" (file-name-nondirectory path))
                    title table))))
@@ -85,7 +85,7 @@ the corresponding sidecar."
       (goto-char (point-min))
       (catch 'response
         (while (not (eobp))
-          (when-let ((obj (roster--read-json
+          (when-let* ((obj (roster--read-json
                            (buffer-substring-no-properties
                             (point) (line-end-position)))))
             (when (equal (plist-get obj :id) request-id)
@@ -126,7 +126,7 @@ the corresponding sidecar."
 
 (defun roster--codex-check-response (response)
   "Return RESPONSE result, or signal its Codex app-server error."
-  (when-let ((error-object (plist-get response :error)))
+  (when-let* ((error-object (plist-get response :error)))
     (user-error "Codex app-server error: %s"
                 (or (plist-get error-object :message) error-object)))
   (plist-get response :result))
@@ -228,7 +228,7 @@ ARCHIVED is non-nil when THREAD came from the archived listing."
         (let* ((page (roster--codex-list-page archived cursor))
                (threads (plist-get page :data)))
           (dolist (thread threads)
-            (when-let ((session (roster--codex-thread-from-api thread archived)))
+            (when-let* ((session (roster--codex-thread-from-api thread archived)))
               (push session sessions)))
           (setq cursor (plist-get page :nextCursor))))
     (nreverse sessions)))

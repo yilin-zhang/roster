@@ -89,7 +89,7 @@ capability must be callable when present."
 
 (defun roster--call-with-backend-batch (backend function)
   "Call FUNCTION inside BACKEND's batch scope when it provides one."
-  (if-let ((batch (roster-backend-batch backend)))
+  (if-let* ((batch (roster-backend-batch backend)))
       (funcall batch function)
     (funcall function)))
 

@@ -67,14 +67,14 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
               (pcase type
                 ("session"
                  (unless session-id
-                   (when-let ((value (plist-get obj :id)))
+                   (when-let* ((value (plist-get obj :id)))
                      (setq session-id value)))
                  (unless cwd
-                   (when-let ((value (plist-get obj :cwd)))
+                   (when-let* ((value (plist-get obj :cwd)))
                      (setq cwd value))))
                 ((or "message" "model_change" "thinking_level_change" "compaction"
                      "branch_summary" "custom" "custom_message" "label" "session_info")
-                 (when-let ((value (plist-get obj :id)))
+                 (when-let* ((value (plist-get obj :id)))
                    (setq last-entry-id value))
                  (when (and (equal type "message") (not title-candidate))
                    (let ((message (plist-get obj :message)))
@@ -83,7 +83,7 @@ Returns plist with keys :id, :cwd, :title-candidate, :session-name,
                          (unless (and text (string-prefix-p "/" text))
                            (setq title-candidate text))))))
                  (when (equal type "session_info")
-                   (when-let ((value (plist-get obj :name)))
+                   (when-let* ((value (plist-get obj :name)))
                      (unless (string-empty-p value)
                        (setq session-name value)))))))
             (forward-line 1)))

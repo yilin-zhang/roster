@@ -73,7 +73,7 @@ is non-nil."
   (let ((tools
          (seq-filter
           (lambda (tool)
-            (when-let ((backend (gethash tool roster--backends)))
+            (when-let* ((backend (gethash tool roster--backends)))
               (roster-backend-new-command backend)))
           (roster--enabled-tools))))
     (cond
@@ -330,7 +330,7 @@ With a prefix ARG, open the session directory in Dired first."
 
 (defun roster--add-mark-overlay (session-id)
   "Highlight the current line as marked for SESSION-ID."
-  (when-let ((existing (gethash session-id roster--mark-overlays)))
+  (when-let* ((existing (gethash session-id roster--mark-overlays)))
     (roster--delete-mark-overlays existing))
   (let ((ov (make-overlay (line-beginning-position) (line-end-position)))
         (mark-ov (make-overlay (line-beginning-position)
@@ -401,7 +401,7 @@ jumps as little as possible."
                             (window-start window) (point) nil window)))
          (target-key (roster--nearest-surviving-session excluded-keys)))
     (funcall function)
-    (when-let ((line (roster--line-of-session target-key)))
+    (when-let* ((line (roster--line-of-session target-key)))
       (goto-char (point-min))
       (forward-line (1- line))
       (when window
@@ -426,7 +426,7 @@ With an active region, mark all sessions in the region (no toggle)."
           (goto-char beg)
           (beginning-of-line)
           (while (<= (line-beginning-position) finish)
-            (when-let ((id (tabulated-list-get-id)))
+            (when-let* ((id (tabulated-list-get-id)))
               (puthash id t roster--marked)
               (roster--add-mark-overlay id))
             (forward-line 1)))
@@ -439,7 +439,7 @@ With an active region, mark all sessions in the region (no toggle)."
       (if (gethash id roster--marked)
           (progn
             (remhash id roster--marked)
-            (when-let ((ovs (gethash id roster--mark-overlays)))
+            (when-let* ((ovs (gethash id roster--mark-overlays)))
               (roster--delete-mark-overlays ovs)
               (remhash id roster--mark-overlays)))
         (puthash id t roster--marked)
@@ -452,7 +452,7 @@ With an active region, mark all sessions in the region (no toggle)."
   (let ((id (tabulated-list-get-id)))
     (unless id (user-error "No session on this line"))
     (remhash id roster--marked)
-    (when-let ((ovs (gethash id roster--mark-overlays)))
+    (when-let* ((ovs (gethash id roster--mark-overlays)))
       (roster--delete-mark-overlays ovs)
       (remhash id roster--mark-overlays))
     (forward-line 1)))

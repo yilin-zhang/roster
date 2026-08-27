@@ -67,7 +67,7 @@ Set to zero to keep it alive until Emacs exits."
 
 (defun roster--opencode-process-filter (process output)
   "Append OUTPUT from OpenCode PROCESS while bounding its log buffer."
-  (when-let ((buffer (process-buffer process)))
+  (when-let* ((buffer (process-buffer process)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (goto-char (point-max))
@@ -205,7 +205,7 @@ Set to zero to keep it alive until Emacs exits."
 
 (defun roster--opencode-query-string (parameters)
   "Return URL query string for non-nil PARAMETERS."
-  (when-let ((values
+  (when-let* ((values
               (seq-keep
                (lambda (pair)
                  (when (cdr pair)
