@@ -425,6 +425,62 @@ not a buffer line)."
         (should (equal (tabulated-list-get-id) '(claude . "s3")))
         (should (zerop (hash-table-count roster--marked)))))))
 
+(ert-deftest roster-delete-keeps-failed-sessions-and-refreshes ()
+  "A mid-run failure must not leave the list showing deleted sessions."
+  (let (attempted reloaded messages)
+    (roster-test--with-list-buffer
+        '((:id "s1" :title "A" :directory "/a" :time-updated 3000 :tool claude
+               :encoded-dir "-a")
+          (:id "s2" :title "B" :directory "/b" :time-updated 2000 :tool claude
+               :encoded-dir "-b")
+          (:id "s3" :title "C" :directory "/c" :time-updated 1000 :tool claude
+               :encoded-dir "-c"))
+      (puthash '(claude . "s1") t roster--marked)
+      (puthash '(claude . "s2") t roster--marked)
+      (puthash '(claude . "s3") t roster--marked)
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'roster--do-delete-session)
+                 (lambda (session)
+                   (push (plist-get session :id) attempted)
+                   (when (equal (plist-get session :id) "s2")
+                     (error "backend refused"))))
+                ((symbol-function 'roster--reload-tools)
+                 (lambda (tools)
+                   (setq reloaded tools)
+                   (roster--redisplay-sessions)))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages)))
+                ((symbol-function 'recenter) #'ignore))
+        (roster-delete)
+        ;; The failure of s2 must not stop s3 from being attempted.
+        (should (equal (nreverse attempted) '("s1" "s2" "s3")))
+        (should (equal (seq-uniq reloaded) '(claude)))
+        ;; Only the survivor is still listed, and it keeps its mark so the
+        ;; user can retry it.
+        (should (equal (mapcar #'car tabulated-list-entries)
+                       '((claude . "s2"))))
+        (should (equal (roster--marked-keys) '((claude . "s2"))))
+        (should (gethash '(claude . "s2") roster--mark-overlays))
+        (should (string-match-p "1 failed" (car messages)))))))
+
+(ert-deftest roster-delete-at-point-refreshes-after-a-failure ()
+  (let (reloaded)
+    (roster-test--with-list-buffer
+        '((:id "s1" :title "A" :directory "/a" :time-updated 1000 :tool claude
+               :encoded-dir "-a"))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'roster--do-delete-session)
+                 (lambda (_session) (error "backend refused")))
+                ((symbol-function 'roster--reload-tools)
+                 (lambda (tools) (setq reloaded tools)))
+                ((symbol-function 'message) (lambda (&rest _) nil)))
+        (roster-delete)
+        (should (equal reloaded '(claude)))
+        ;; The session survived, so it must still be in the snapshot.
+        (should (equal (mapcar #'roster--session-id roster--all-sessions)
+                       '("s1")))))))
+
 (ert-deftest roster-archive-calls-do-archive ()
   (let (archived-calls reloaded)
     (roster-test--with-list-buffer

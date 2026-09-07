@@ -472,28 +472,98 @@ With an active region, mark all sessions in the region (no toggle)."
        backend
        (lambda () (mapc function backend-sessions))))))
 
+(define-error 'roster--batch-failed "Roster batch had failures")
+
+(defun roster--unmark-keys (keys)
+  "Remove the mark and overlay of every session key in KEYS."
+  (dolist (key keys)
+    (remhash key roster--marked)
+    (when-let* ((ovs (gethash key roster--mark-overlays)))
+      (roster--delete-mark-overlays ovs)
+      (remhash key roster--mark-overlays))))
+
+(defun roster--delete-sessions (sessions)
+  "Delete SESSIONS best effort and report what happened.
+Return a cons of the sessions that were deleted and an alist mapping each
+remaining session to the error message it failed with.  A session that
+fails does not abort the run: the surviving sessions still get their
+chance, so the list can be reconciled with the backends afterwards."
+  (let (deleted failed)
+    (dolist (group (seq-group-by #'roster--session-tool sessions))
+      (let ((backend (roster--backend (car group)))
+            (group-sessions (cdr group))
+            (group-failed nil))
+        (condition-case nil
+            (roster--call-with-backend-batch
+             backend
+             (lambda ()
+               (dolist (session group-sessions)
+                 (condition-case err
+                     (progn
+                       (roster--do-delete-session session)
+                       (push session deleted))
+                   (error
+                    (setq group-failed t)
+                    (push (cons session (error-message-string err)) failed))))
+               ;; Leave the batch scope through an error so a backend that
+               ;; pools a connection can retire the suspect one, exactly as
+               ;; it would if the first failure had propagated.
+               (when group-failed
+                 (signal 'roster--batch-failed nil))))
+          (roster--batch-failed nil))))
+    (cons (nreverse deleted) (nreverse failed))))
+
+(defun roster--describe-failures (failed)
+  "Return a short human description of the FAILED alist."
+  (let ((first (car failed)))
+    (concat (format "%s: %s"
+                    (roster--session-title (car first))
+                    (cdr first))
+            (when (cdr failed)
+              (format " (and %d more)" (length (cdr failed)))))))
+
+(defun roster--report-deletions (deleted failed)
+  "Report the outcome of a bulk delete of DELETED and FAILED sessions."
+  (cond
+   ((null failed)
+    (message "Deleted %d sessions" (length deleted)))
+   ((null deleted)
+    (message "Deleted no sessions; %d failed - %s"
+             (length failed) (roster--describe-failures failed)))
+   (t
+    (message "Deleted %d sessions; %d failed - %s"
+             (length deleted) (length failed)
+             (roster--describe-failures failed)))))
+
 (defun roster-delete ()
   "Delete all marked sessions after confirmation.
-If no sessions are marked, delete the session on the current line."
+If no sessions are marked, delete the session on the current line.
+Sessions that the backend refuses to delete stay in the list and keep
+their mark, so the buffer always shows what really survived."
   (interactive)
   (let ((keys (roster--marked-keys)))
     (if (null keys)
         (roster--delete-at-point)
       (when (yes-or-no-p (format "Delete %d marked sessions? " (length keys)))
         (let* ((sessions (seq-keep #'roster--session-by-key keys))
-               (tools (mapcar #'roster--session-tool sessions)))
+               (tools (mapcar #'roster--session-tool sessions))
+               (deleted nil)
+               (failed nil))
           (roster--call-restoring-position
            (lambda ()
-             (roster--for-each-session-by-backend
-              #'roster--do-delete-session sessions)
-             (setq roster--all-sessions
-                   (seq-remove (lambda (session)
-                                 (member (roster--session-key session) keys))
-                               roster--all-sessions))
-             (roster--clear-marks)
+             (let ((result (roster--delete-sessions sessions)))
+               (setq deleted (car result)
+                     failed (cdr result)))
+             (let ((deleted-keys (mapcar #'roster--session-key deleted)))
+               (setq roster--all-sessions
+                     (seq-remove (lambda (session)
+                                   (member (roster--session-key session)
+                                           deleted-keys))
+                                 roster--all-sessions))
+               (roster--unmark-keys deleted-keys))
              (roster--reload-tools tools))
            keys)
-          (message "Deleted %d sessions" (length keys)))))))
+          (roster--report-deletions deleted failed))))))
 
 (defun roster-archive ()
   "Toggle archive state of all marked sessions after confirmation.
@@ -633,14 +703,23 @@ and supports tool-specific reloads."
    session #'roster-backend-archive "archiving" archived))
 
 (defun roster--delete-session-command (session)
-  "Delete SESSION and return non-nil on success."
+  "Delete SESSION and return non-nil on success.
+On failure the session's backend is reloaded, because a deletion can fail
+after it has already removed part of the session, and return nil."
   (let ((session-id (roster--session-id session))
         (title (roster--session-title session))
         (directory (roster--session-directory session)))
     (when (yes-or-no-p (format "Delete session '%s' (%s)? " title session-id))
-      (roster--do-delete-session session)
-      (message "Deleted session %s from %s" session-id directory)
-      t)))
+      (condition-case err
+          (progn
+            (roster--do-delete-session session)
+            (message "Deleted session %s from %s" session-id directory)
+            t)
+        (error
+         (roster--reload-tools (list (roster--session-tool session)))
+         (message "Failed to delete session %s: %s"
+                  session-id (error-message-string err))
+         nil)))))
 
 (defun roster--move-session-command (session)
   "Move SESSION using its backend capability."

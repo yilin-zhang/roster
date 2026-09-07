@@ -86,6 +86,11 @@ agent executable names and data locations.
 | `g`         | Refresh                                                 |
 | `q`         | Quit                                                    |
 
+A bulk delete keeps going when a session fails to delete.  The sessions that
+were removed disappear from the list, the ones that failed stay put and keep
+their mark so they can be retried, and the echo area reports how many failed
+and why.
+
 ## Supported tools
 
 | Tool        | Tag  | Resume | Rename | Archive | Delete | Move directory |
