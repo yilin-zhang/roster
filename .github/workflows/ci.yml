@@ -21,6 +21,11 @@ jobs:
         with:
           version: ${{ steps.emacs-version.outputs.version }}
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Run checks (parens, indent, byte-compile, checkdoc, package-lint, tests)
         run: |
           ./scripts/check-all.sh

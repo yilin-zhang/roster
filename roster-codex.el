@@ -32,49 +32,6 @@
 (defvar roster--codex-stdout nil)
 (defvar roster--codex-stderr nil)
 (defvar roster--codex-request-id 0)
-(defvar roster--codex-legacy-titles nil)
-
-;;; Legacy metadata
-
-(defun roster--codex-roster-dir ()
-  "Return the directory containing deprecated Codex roster sidecars."
-  (expand-file-name "roster" roster-codex-dir))
-
-(defun roster--codex-sidecar-path (session-id)
-  "Return deprecated roster sidecar path for Codex SESSION-ID."
-  (expand-file-name (concat session-id ".roster.json")
-                    (roster--codex-roster-dir)))
-
-(defun roster--codex-read-sidecar (session-id)
-  "Return deprecated roster metadata for Codex SESSION-ID, or nil.
-Compatibility path for names written before roster used Codex's native
-thread metadata and app-server API.  A successful native rename removes
-the corresponding sidecar."
-  (roster--read-sidecar (roster--codex-sidecar-path session-id)))
-
-(defun roster--codex-delete-legacy-sidecar (session-id)
-  "Delete deprecated roster sidecar for Codex SESSION-ID when present."
-  (let ((path (roster--codex-sidecar-path session-id)))
-    (when (file-exists-p path)
-      (delete-file path))))
-
-(defun roster--codex-load-legacy-titles ()
-  "Return an id-to-title table for deprecated Codex sidecars."
-  (let ((table (make-hash-table :test #'equal))
-        (directory (roster--codex-roster-dir)))
-    (when (file-directory-p directory)
-      (dolist (path (directory-files directory t "\\.roster\\.json\\'"))
-        (when-let* ((title (cdr (assoc "title" (roster--read-sidecar path)))))
-          (puthash (string-remove-suffix
-                    ".roster.json" (file-name-nondirectory path))
-                   title table))))
-    table))
-
-(defun roster--codex-legacy-title (session-id)
-  "Return deprecated sidecar title for SESSION-ID."
-  (if (hash-table-p roster--codex-legacy-titles)
-      (gethash session-id roster--codex-legacy-titles)
-    (cdr (assoc "title" (roster--codex-read-sidecar session-id)))))
 
 ;;; App-server protocol
 
@@ -188,8 +145,7 @@ Reuse the dynamically scoped connection during loads and bulk operations."
 ARCHIVED is non-nil when THREAD came from the archived listing."
   (when-let* ((session-id (plist-get thread :id))
               ((stringp session-id)))
-    (let* ((legacy-title (roster--codex-legacy-title session-id))
-           (cwd (plist-get thread :cwd))
+    (let* ((cwd (plist-get thread :cwd))
            (directory (expand-file-name
                        (if (and (stringp cwd) (not (string-empty-p cwd)))
                            cwd
@@ -198,10 +154,7 @@ ARCHIVED is non-nil when THREAD came from the archived listing."
            (preview (plist-get thread :preview))
            (updated-at (plist-get thread :updatedAt)))
       (list :id session-id
-            ;; Compatibility: preserve explicit legacy roster names until the
-            ;; next native rename removes their sidecar.
-            :title (or legacy-title
-                       (and (stringp name) (not (string-empty-p name)) name)
+            :title (or (and (stringp name) (not (string-empty-p name)) name)
                        (and (stringp preview) (not (string-empty-p preview))
                             (roster--truncate-title preview))
                        roster--untitled)
@@ -238,16 +191,15 @@ ARCHIVED is non-nil when THREAD came from the archived listing."
 Include archived threads only when INCLUDE-ARCHIVED is non-nil."
   (roster--codex-call-with-app-server
    (lambda ()
-     (let ((roster--codex-legacy-titles (roster--codex-load-legacy-titles)))
-       (append (roster--codex-load-state nil)
-               (when include-archived
-                 (roster--codex-load-state t)))))))
+     (append (roster--codex-load-state nil)
+             (when include-archived
+               (roster--codex-load-state t))))))
 
 ;;; Mutations
 
 (defun roster--codex-delete-session (session)
   "Delete Codex SESSION through app-server."
-  (let ((session-id (plist-get session :id)))
+  (let ((session-id (roster--session-id session)))
     (condition-case err
         (roster--codex-app-server-request
          "thread/delete" `(("threadId" . ,session-id)))
@@ -257,16 +209,13 @@ Include archived threads only when INCLUDE-ARCHIVED is non-nil."
            (user-error
             "Codex session %s is still open; close its Codex client, then retry"
             session-id)
-         (signal (car err) (cdr err)))))
-    (roster--codex-delete-legacy-sidecar session-id)))
+         (signal (car err) (cdr err)))))))
 
 (defun roster--codex-rename-session (session new-title)
   "Rename Codex SESSION to NEW-TITLE through app-server."
-  (let ((session-id (roster--session-id session)))
-    (roster--codex-app-server-request
-     "thread/name/set"
-     `(("threadId" . ,session-id) ("name" . ,new-title)))
-    (roster--codex-delete-legacy-sidecar session-id)))
+  (roster--codex-app-server-request
+   "thread/name/set"
+   `(("threadId" . ,(roster--session-id session)) ("name" . ,new-title))))
 
 (defun roster--codex-do-archive (session archived)
   "Set Codex SESSION archived state to ARCHIVED through app-server."

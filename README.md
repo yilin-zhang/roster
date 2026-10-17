@@ -14,9 +14,20 @@ other child sessions do not clutter the list.
 - At least one supported coding agent installed and configured
 - macOS when using the built-in Ghostty or iTerm launchers
 
-Claude's official Agent SDK is optional.  When its Python package is available,
-Roster uses `list_sessions` and `rename_session` automatically; otherwise it
-falls back to Claude's documented local transcript format.
+The Claude Code backend requires Node.js 18 or newer and npm.  Roster talks to
+Claude through the official Agent SDK's session API (`listSessions`,
+`renameSession`, and `deleteSession`) via a small bridge script.  Install the
+pinned SDK version once with:
+
+```
+M-x roster-claude-install-sdk
+```
+
+This installs `@anthropic-ai/claude-agent-sdk` into `claude-sdk/` inside the
+Roster directory (about 60 MB).  Optional dependencies, which only carry a
+bundled copy of the Claude Code binary, are skipped.  Set
+`roster-claude-sdk-directory` to install elsewhere, for example when the Roster
+directory is managed by a package manager and replaced on upgrade.
 
 ## Installation
 
@@ -101,9 +112,11 @@ and why.
 | pi          | `PI` | Yes    | Yes    | Yes     | Yes    | No             |
 
 Roster prefers each tool's public management surface.  Codex uses app-server;
-OpenCode uses its local HTTP server; Claude uses Agent SDK when installed; and
-pi follows its published `SessionManager` file contract.  Archive remains
-Roster-only for Claude and pi because neither tool exposes that concept.
+OpenCode uses its local HTTP server; Claude uses Agent SDK; and pi follows its
+published `SessionManager` file contract.  Archive remains Roster-only for
+Claude and pi because neither tool exposes that concept.  Deleting a Claude
+session is permanent: the SDK removes its transcript and subagent transcripts
+rather than moving them to the trash.
 OpenCode 1.18 can archive but cannot unarchive over HTTP, so only that operation
 temporarily retains an isolated SQLite compatibility path.
 

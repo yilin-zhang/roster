@@ -2,388 +2,258 @@
 
 ;;; Commentary:
 
-;; Internal library for roster.
+;; Tests for the Claude Agent SDK backend.
 
 ;;; Code:
 
 (require 'roster-test-helpers)
 
-;;; Session loading — Claude Code backend
+(defmacro roster-claude-test-with-root (&rest body)
+  "Run BODY with `roster-claude-dir' bound to a fresh temporary directory."
+  (declare (indent 0))
+  `(let* ((root (make-temp-file "roster-claude-root-" t))
+          (roster-claude-dir root))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory root t))))
 
-(ert-deftest roster-claude-parse-jsonl-reads-user-session-metadata ()
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert "{\"slug\":\"claude-slug\",\"type\":\"system\"}\n")
-            (insert (concat
-                     "{\"type\":\"user\",\"cwd\":\"/tmp/claude\","
-                     "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello Claude\"}]}}\n")))
-          (let ((meta (roster--claude-parse-jsonl path)))
-            (should (equal (plist-get meta :slug) "claude-slug"))
-            (should (equal (plist-get meta :cwd) "/tmp/claude"))
-            (should (equal (plist-get meta :title-candidate) "Hello Claude"))
-            (should (> (plist-get meta :time-updated) 0))))
-      (delete-file path))))
+(defun roster-claude-test-sdk-result (&rest sessions)
+  "Return a bridge `list' result containing SESSIONS."
+  (list :available t :sessions sessions))
 
-(ert-deftest roster-claude-parse-jsonl-skips-system-injected-titles ()
-  "Messages starting with '<' (e.g. /compact output) must not become titles."
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert "{\"slug\":\"my-slug\",\"type\":\"system\"}\n")
-            (insert (concat
-                     "{\"type\":\"user\",\"cwd\":\"/tmp/x\","
-                     "\"message\":{\"content\":[{\"type\":\"text\","
-                     "\"text\":\"<local-command-caveat>compact output</local-command-caveat>\"}]}}\n"))
-            (insert (concat
-                     "{\"type\":\"user\",\"cwd\":\"/tmp/x\","
-                     "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Real question\"}]}}\n")))
-          (let ((meta (roster--claude-parse-jsonl path)))
-            (should (equal (plist-get meta :title-candidate) "Real question"))))
-      (delete-file path))))
+;;; Session loading
 
-(ert-deftest roster-claude-title-prefers-recorded-ai-title ()
-  "Claude's generated title is preferred to its slug and first prompt."
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert "{\"slug\":\"old-slug\",\"type\":\"system\"}\n")
-            (insert "{\"type\":\"user\",\"cwd\":\"/tmp/claude\",\"message\":{\"content\":\"First prompt\"}}\n")
-            (insert "{\"type\":\"ai-title\",\"aiTitle\":\"Generated title\",\"sessionId\":\"cc-1\"}\n"))
-          (let ((meta (roster--claude-parse-jsonl path)))
-            (should (equal (plist-get meta :ai-title) "Generated title"))
-            (should (equal (roster--claude-title meta nil) "Generated title"))))
-      (delete-file path))))
-
-(ert-deftest roster-claude-title-prefers-custom-title-to-ai-title ()
-  "An explicit /rename remains authoritative over generated titles."
-  (let ((meta (list :custom-title "Chosen title"
-                    :ai-title "Generated title"
-                    :slug "old-slug"
-                    :title-candidate "First prompt")))
-    (should (equal (roster--claude-title meta nil) "Chosen title"))))
-
-(ert-deftest roster-claude-parse-jsonl-reads-once-and-preserves-title-semantics ()
-  "A single forward scan must keep first metadata and latest recorded titles."
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl"))
-        (reads 0)
-        (insert-file-contents-original (symbol-function 'insert-file-contents)))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert "{\"slug\":\"first-slug\",\"type\":\"system\"}\n")
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"cli\","
-                     "\"cwd\":\"/tmp/claude\","
-                     "\"message\":{\"content\":\"First prompt\"}}\n"))
-            (insert "{\"type\":\"ai-title\",\"aiTitle\":\"Old AI title\"}\n")
-            (insert "{\"slug\":\"later-slug\",\"type\":\"system\"}\n")
-            (insert "{\"type\":\"custom-title\",\"customTitle\":\"Chosen title\"}\n")
-            (insert "{\"type\":\"ai-title\",\"aiTitle\":\"Latest AI title\"}\n"))
-          (cl-letf (((symbol-function 'insert-file-contents)
-                     (lambda (&rest arguments)
-                       (cl-incf reads)
-                       (apply insert-file-contents-original arguments))))
-            (let ((meta (roster--claude-parse-jsonl path)))
-              (should (= reads 1))
-              (should (equal (plist-get meta :slug) "first-slug"))
-              (should (equal (plist-get meta :title-candidate) "First prompt"))
-              (should (equal (plist-get meta :custom-title) "Chosen title"))
-              (should (equal (plist-get meta :ai-title) "Latest AI title")))))
-      (delete-file path))))
-
-(ert-deftest roster-claude-transcript-cache-invalidates-after-append ()
-  "Unchanged transcripts are reused, while appended records are reparsed."
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl"))
-        (roster--claude-transcript-cache (make-hash-table :test #'equal))
-        (reads 0)
-        (insert-file-contents-original (symbol-function 'insert-file-contents)))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert (concat
-                     "{\"type\":\"user\",\"cwd\":\"/tmp/claude\","
-                     "\"message\":{\"content\":\"First prompt\"}}\n")))
-          (cl-letf (((symbol-function 'insert-file-contents)
-                     (lambda (&rest arguments)
-                       (cl-incf reads)
-                       (apply insert-file-contents-original arguments))))
-            (should (equal (plist-get (roster--claude-parse-jsonl path)
-                                      :title-candidate)
-                           "First prompt"))
-            (should (equal (plist-get (roster--claude-parse-jsonl path)
-                                      :title-candidate)
-                           "First prompt"))
-            (should (= reads 1))
-            (with-temp-buffer
-              (insert "{\"type\":\"custom-title\",\"customTitle\":\"New title\"}\n")
-              (write-region (point-min) (point-max) path t 'silent))
-            (should (equal (plist-get (roster--claude-parse-jsonl path)
-                                      :custom-title)
-                           "New title"))
-            (should (= reads 2))))
-      (delete-file path))))
-
-(ert-deftest roster-claude-cached-transcript-still-reads-current-sidecar ()
-  "Roster metadata remains fresh when only its small sidecar changes."
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (roster--claude-transcript-cache (make-hash-table :test #'equal))
-         (path (expand-file-name "cc-1.jsonl" root)))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert (concat
-                     "{\"type\":\"user\",\"cwd\":\"/tmp/claude\","
-                     "\"message\":{\"content\":\"First prompt\"}}\n")))
-          (should (equal (plist-get (roster--claude-session-from-file "-tmp" path)
-                                    :title)
-                         "First prompt"))
-          (roster--claude-write-sidecar "cc-1" "Sidecar title" 123)
-          (let ((session (roster--claude-session-from-file "-tmp" path)))
-            (should (equal (plist-get session :title) "Sidecar title"))
-            (should (= (plist-get session :time-archived) 123))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-transcript-cache-prunes-removed-files ()
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (roster-claude-use-agent-sdk nil)
-         (roster--claude-transcript-cache (make-hash-table :test #'equal))
-         (session-dir (expand-file-name "projects/-tmp-proj" root))
-         (path (expand-file-name "cc-1.jsonl" session-dir)))
-    (unwind-protect
-        (progn
-          (make-directory session-dir t)
-          (with-temp-file path
-            (insert "{\"type\":\"user\",\"cwd\":\"/tmp/proj\"}\n"))
-          (roster--claude-load-sessions-from-transcripts t)
-          (should (= (hash-table-count roster--claude-transcript-cache) 1))
-          (delete-file path)
-          (roster--claude-load-sessions-from-transcripts t)
-          (should (zerop (hash-table-count roster--claude-transcript-cache))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-archive-preserves-sidecar-title ()
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (session '(:id "cc-1" :tool claude)))
-    (unwind-protect
-        (progn
-          (roster--claude-write-sidecar "cc-1" "Saved title" nil)
-          (roster--claude-do-archive session t)
-          (let ((sidecar (roster--claude-read-sidecar "cc-1")))
-            (should (equal (cdr (assoc "title" sidecar)) "Saved title"))
-            (should (numberp (cdr (assoc "time_archived" sidecar))))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-load-sessions-prefers-native-sdk ()
-  (let ((roster-claude-use-agent-sdk 'auto)
-        (sdk-result
-         (list :available t
-               :sessions
-               (list (list :id "cc-1"
-                           :title "SDK title"
-                           :directory "/tmp/sdk"
-                           :time_updated 42)))))
+(ert-deftest roster-claude-load-sessions-maps-sdk-sessions ()
+  (roster-claude-test-with-root
     (cl-letf (((symbol-function 'roster--claude-sdk-call)
-               (lambda (&rest _) sdk-result))
-              ((symbol-function 'roster--claude-load-sessions-from-transcripts)
-               (lambda (&rest _) (error "compatibility fallback used"))))
+               (lambda (&rest _)
+                 (roster-claude-test-sdk-result
+                  (list :id "cc-1" :title "SDK title"
+                        :directory "/tmp/sdk" :time_updated 42)))))
       (let ((session (car (roster--claude-load-sessions))))
         (should (equal (plist-get session :id) "cc-1"))
         (should (equal (plist-get session :title) "SDK title"))
         (should (equal (plist-get session :directory) "/tmp/sdk"))
-        (should (= (plist-get session :time-updated) 42))))))
+        (should (= (plist-get session :time-updated) 42))
+        (should-not (plist-get session :time-archived))
+        (should (eq (plist-get session :tool) 'claude))))))
 
-(ert-deftest roster-claude-load-sessions-filters-native-sdk-results ()
-  "The native SDK listing must omit sessions that the CLI cannot resume."
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (roster-claude-use-agent-sdk 'auto)
-         (session-dir (expand-file-name "projects/-tmp-proj" root))
-         (sdk-result
-          (list :available t
-                :sessions
-                (list (list :id "cc-cli" :title "CLI" :directory "/tmp/proj")
-                      (list :id "cc-sdk" :title "SDK" :directory "/tmp/proj")))))
-    (unwind-protect
-        (progn
-          (make-directory session-dir t)
-          (with-temp-file (expand-file-name "cc-cli.jsonl" session-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Typed prompt\"}}\n")))
-          (with-temp-file (expand-file-name "cc-sdk.jsonl" session-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"sdk-py\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Automated prompt\"}}\n")))
-          (cl-letf (((symbol-function 'roster--claude-sdk-call)
-                     (lambda (&rest _) sdk-result)))
-            (should (equal (mapcar (lambda (session) (plist-get session :id))
-                                   (roster--claude-load-sessions t))
-                           '("cc-cli")))))
-      (delete-directory root t))))
+(ert-deftest roster-claude-load-sessions-handles-missing-fields ()
+  "Long titles are truncated; missing titles and directories get defaults."
+  (roster-claude-test-with-root
+    (cl-letf (((symbol-function 'roster--claude-sdk-call)
+               (lambda (&rest _)
+                 (roster-claude-test-sdk-result
+                  (list :id "long" :title (make-string 100 ?x)
+                        :directory "/tmp")
+                  (list :id "bare" :title "" :directory nil)))))
+      (pcase-let ((`(,long ,bare) (roster--claude-load-sessions)))
+        (should (= (length (plist-get long :title)) roster--title-max-length))
+        (should (equal (plist-get bare :title) roster--untitled))
+        (should (equal (plist-get bare :directory) (expand-file-name "~")))
+        (should (= (plist-get bare :time-updated) 0))))))
 
-(ert-deftest roster-claude-load-sessions-falls-back-without-sdk ()
-  (let ((roster-claude-use-agent-sdk 'auto)
-        (expected '((:id "cc-1" :tool claude))))
-    (cl-letf (((symbol-function 'roster--claude-sdk-call) (lambda (&rest _) nil))
-              ((symbol-function 'roster--claude-load-sessions-from-transcripts)
-               (lambda (_include-archived) expected)))
-      (should (equal (roster--claude-load-sessions t) expected)))))
+(ert-deftest roster-claude-load-sessions-applies-archive-sidecar ()
+  (roster-claude-test-with-root
+    (roster--claude-do-archive '(:id "cc-old" :tool claude) t)
+    (cl-letf (((symbol-function 'roster--claude-sdk-call)
+               (lambda (&rest _)
+                 (roster-claude-test-sdk-result
+                  (list :id "cc-old" :title "Old" :directory "/tmp")
+                  (list :id "cc-new" :title "New" :directory "/tmp")))))
+      (should (equal (mapcar #'roster--session-id
+                             (roster--claude-load-sessions))
+                     '("cc-new")))
+      (let ((sessions (roster--claude-load-sessions t)))
+        (should (equal (mapcar #'roster--session-id sessions)
+                       '("cc-old" "cc-new")))
+        (should (roster--session-archived-p (car sessions)))))))
 
-(ert-deftest roster-claude-sdk-auto-falls-back-without-python ()
-  (let ((roster-claude-use-agent-sdk 'auto)
-        (roster--claude-sdk-unavailable-key nil))
-    (cl-letf (((symbol-function 'call-process)
-               (lambda (&rest _) (signal 'file-missing '("python3")))))
-      (should-not (roster--claude-sdk-call "list")))))
+;;; Mutations
 
-(ert-deftest roster-claude-sdk-auto-caches-unavailable-result ()
-  (let ((roster-claude-use-agent-sdk 'auto)
-        (roster--claude-sdk-unavailable-key nil)
-        (calls 0))
+(ert-deftest roster-claude-archive-round-trips-through-sidecar ()
+  (roster-claude-test-with-root
+    (let ((session '(:id "cc-1" :tool claude)))
+      (roster--claude-do-archive session t)
+      (should (numberp (roster--claude-time-archived "cc-1")))
+      (roster--claude-do-archive session nil)
+      (should-not (roster--claude-time-archived "cc-1")))))
+
+(ert-deftest roster-claude-rename-uses-sdk ()
+  (let (call)
+    (cl-letf (((symbol-function 'roster--claude-sdk-call)
+               (lambda (&rest arguments) (setq call arguments) '(:available t))))
+      (should (roster--claude-rename-session
+               '(:id "cc-1" :directory "/tmp/sdk" :tool claude) "New title"))
+      (should (equal call '("rename" "cc-1" "New title"))))))
+
+(ert-deftest roster-claude-delete-uses-sdk-and-removes-sidecar ()
+  (roster-claude-test-with-root
+    (let ((session '(:id "cc-1" :tool claude))
+          call)
+      (roster--claude-do-archive session t)
+      (cl-letf (((symbol-function 'roster--claude-sdk-call)
+                 (lambda (&rest arguments) (setq call arguments) '(:available t))))
+        (roster--claude-delete-session session))
+      (should (equal call '("delete" "cc-1")))
+      (should-not (file-exists-p (roster--claude-sidecar-path "cc-1"))))))
+
+(ert-deftest roster-claude-delete-keeps-sidecar-when-sdk-fails ()
+  (roster-claude-test-with-root
+    (let ((session '(:id "cc-1" :tool claude)))
+      (roster--claude-do-archive session t)
+      (cl-letf (((symbol-function 'roster--claude-sdk-call)
+                 (lambda (&rest _) (user-error "Claude Agent SDK error: boom"))))
+        (should-error (roster--claude-delete-session session)
+                      :type 'user-error))
+      (should (file-exists-p (roster--claude-sidecar-path "cc-1"))))))
+
+;;; Bridge protocol
+
+(ert-deftest roster-claude-sdk-call-requires-sdk ()
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _) (insert "{\"available\":false}") 0)))
+    (should-error (roster--claude-sdk-call "list") :type 'user-error)))
+
+(ert-deftest roster-claude-sdk-call-requires-node ()
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _) (signal 'file-missing '("node")))))
+    (should-error (roster--claude-sdk-call "list") :type 'user-error)))
+
+(ert-deftest roster-claude-sdk-call-reports-sdk-errors ()
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (&rest _)
+               (insert "{\"available\":true,\"error\":\"Session x not found\"}")
+               1)))
+    (let ((err (should-error (roster--claude-sdk-call "delete" "x")
+                             :type 'user-error)))
+      (should (string-match-p "Session x not found"
+                              (error-message-string err))))))
+
+(ert-deftest roster-claude-sdk-call-passes-directories ()
+  (let ((roster-claude-dir "/tmp/claude-config")
+        (roster-claude-sdk-directory "/tmp/claude-sdk")
+        environment)
     (cl-letf (((symbol-function 'call-process)
                (lambda (&rest _)
-                 (cl-incf calls)
-                 (insert "{\"available\":false}")
+                 (setq environment process-environment)
+                 (insert "{\"available\":true,\"sessions\":[]}")
                  0)))
-      (should-not (roster--claude-sdk-call "list"))
-      (should-not (roster--claude-sdk-call "list"))
-      (should (= calls 1))
-      (roster--claude-reset-sdk-cache)
-      (should-not (roster--claude-sdk-call "list"))
-      (should (= calls 2)))))
+      (roster--claude-sdk-call "list")
+      (should (member "CLAUDE_CONFIG_DIR=/tmp/claude-config" environment))
+      (should (member "ROSTER_CLAUDE_SDK_DIR=/tmp/claude-sdk" environment)))))
 
-(ert-deftest roster-claude-rename-prefers-native-sdk ()
-  (let ((roster-claude-use-agent-sdk 'auto)
-        (session '(:id "cc-1" :directory "/tmp/sdk" :tool claude))
-        call cleared)
-    (cl-letf (((symbol-function 'roster--claude-sdk-call)
-               (lambda (&rest arguments) (setq call arguments) '(:available t)))
-              ((symbol-function 'roster--claude-clear-legacy-title)
-               (lambda (session-id) (setq cleared session-id)))
-              ((symbol-function 'roster--claude-append-custom-title)
-               (lambda (&rest _) (error "compatibility fallback used"))))
-      (should (roster--claude-rename-session session "New title"))
-      (should (equal call '("rename" "cc-1" "New title" "/tmp/sdk")))
-      (should (equal cleared "cc-1")))))
+(defconst roster-claude-test-fake-sdk
+  "import { appendFileSync } from 'node:fs';
+
+const log = (...call) =>
+  appendFileSync(process.env.ROSTER_FAKE_SDK_LOG, JSON.stringify(call) + '\\n');
+
+export async function listSessions() {
+  return ['cc-cli', 'cc-sdk', 'cc-legacy', 'cc-missing'].map((id) => ({
+    sessionId: id, summary: 'Title ' + id, cwd: '/tmp/proj', lastModified: 7,
+  }));
+}
+
+export async function renameSession(id, title) { log('rename', id, title); }
+
+export async function deleteSession(id) { log('delete', id); }
+"
+  "Stand-in Claude Agent SDK module used to exercise the Node bridge.")
+
+(ert-deftest roster-claude-bridge-filters-non-cli-sessions ()
+  "The real bridge hides SDK-started runs and keeps legacy transcripts.
+Subagent transcripts nested under a session directory are never consulted."
+  (skip-unless (executable-find roster-claude-node-command))
+  (roster-claude-test-with-root
+    (let* ((roster-claude-sdk-directory (expand-file-name "sdk" root))
+           (package-dir (expand-file-name
+                         "node_modules/@anthropic-ai/claude-agent-sdk"
+                         roster-claude-sdk-directory))
+           (project-dir (expand-file-name "projects/-tmp-proj" root))
+           (subagent-dir (expand-file-name "cc-legacy/subagents" project-dir))
+           (process-environment
+            (cons (concat "ROSTER_FAKE_SDK_LOG="
+                          (expand-file-name "calls.jsonl" root))
+                  process-environment)))
+      (make-directory package-dir t)
+      (make-directory subagent-dir t)
+      (with-temp-file (expand-file-name "package.json" package-dir)
+        (insert "{\"name\":\"@anthropic-ai/claude-agent-sdk\","
+                "\"type\":\"module\",\"exports\":{\".\":\"./sdk.mjs\"}}"))
+      (with-temp-file (expand-file-name "sdk.mjs" package-dir)
+        (insert roster-claude-test-fake-sdk))
+      (with-temp-file (expand-file-name "cc-cli.jsonl" project-dir)
+        (insert "{\"type\":\"permission-mode\"}\n"
+                "{\"type\":\"user\",\"entrypoint\":\"cli\"}\n"))
+      (with-temp-file (expand-file-name "cc-sdk.jsonl" project-dir)
+        (insert "{\"type\":\"user\",\"entrypoint\":\"sdk-ts\"}\n"))
+      (with-temp-file (expand-file-name "cc-legacy.jsonl" project-dir)
+        (insert "{\"type\":\"user\"}\n"))
+      (with-temp-file (expand-file-name "cc-legacy.jsonl" subagent-dir)
+        (insert "{\"type\":\"user\",\"entrypoint\":\"sdk-ts\"}\n"))
+      (should (equal (mapcar #'roster--session-id
+                             (roster--claude-load-sessions t))
+                     '("cc-cli" "cc-legacy" "cc-missing")))
+      (roster--claude-rename-session '(:id "cc-cli") "Renamed")
+      (roster--claude-delete-session '(:id "cc-cli"))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents
+                        (expand-file-name "calls.jsonl" root))
+                       (mapcar #'roster--read-json
+                               (split-string (buffer-string) "\n" t)))
+                     '(("rename" "cc-cli" "Renamed")
+                       ("delete" "cc-cli")))))))
+
+(ert-deftest roster-claude-bridge-reports-missing-sdk ()
+  (skip-unless (executable-find roster-claude-node-command))
+  (roster-claude-test-with-root
+    (let ((roster-claude-sdk-directory (expand-file-name "empty" root)))
+      (let ((err (should-error (roster--claude-load-sessions)
+                               :type 'user-error)))
+        (should (string-match-p "roster-claude-install-sdk"
+                                (error-message-string err)))))))
+
+(ert-deftest roster-claude-install-sdk-uses-local-prefix ()
+  (roster-claude-test-with-root
+    (let ((roster-claude-sdk-directory (expand-file-name "sdk" root))
+          command)
+      (cl-letf (((symbol-function 'compilation-start)
+                 (lambda (cmd &rest _) (setq command cmd))))
+        (roster-claude-install-sdk))
+      (should (file-directory-p roster-claude-sdk-directory))
+      (should (string-match-p
+               (regexp-quote (concat "--prefix "
+                                     (shell-quote-argument
+                                      roster-claude-sdk-directory)))
+               command))
+      (should (string-match-p (regexp-quote (shell-quote-argument "--omit=optional"))
+                              command))
+      (should (string-match-p (regexp-quote
+                               (shell-quote-argument roster--claude-sdk-package))
+                              command)))))
+
+;;; Integration with the list
 
 (ert-deftest roster-load-sessions-merges-opencode-and-claude ()
-  (let* ((roster-enabled-tools '(opencode claude))
-         (root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (projects-dir (expand-file-name "projects" root))
-         (encoded-dir "-tmp-proj")
-         (session-id "claude-session-1")
-         (session-dir (expand-file-name encoded-dir projects-dir))
-         (roster-claude-use-agent-sdk nil)
-         (opencode-session
-          (list :id "oc_1"
-                :title "OpenCode Title"
-                :directory "/tmp/opencode"
-                :project-id "proj_1"
-                :time-updated 1700000000000
-                :tool 'opencode)))
-    (unwind-protect
-        (progn
-          (make-directory session-dir t)
-          (with-temp-file (expand-file-name (concat session-id ".jsonl") session-dir)
-            (insert (concat
-                     "{\"slug\":\"claude-slug\",\"type\":\"user\",\"cwd\":\"/tmp/claude\","
-                     "\"message\":{\"content\":\"Claude title\"}}\n")))
-          (cl-letf (((symbol-function 'roster--opencode-load-sessions)
-                     (lambda (&optional _) (list opencode-session))))
-            (let ((sessions (roster--load-sessions)))
-              (should (= (length sessions) 2))
-              (should (equal (mapcar (lambda (s) (plist-get s :tool)) sessions)
-                             '(claude opencode)))
-              (should (equal (plist-get (car sessions) :title) "claude-slug"))
-              (should (equal (plist-get (cadr sessions) :title) "OpenCode Title")))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-parse-jsonl-reads-entrypoint ()
-  (let ((path (make-temp-file "roster-claude-" nil ".jsonl")))
-    (unwind-protect
-        (progn
-          (with-temp-file path
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"sdk-py\",\"cwd\":\"/tmp/x\","
-                     "\"message\":{\"content\":\"Review this change\"}}\n")))
-          (should (equal (plist-get (roster--claude-parse-jsonl path) :entrypoint)
-                         "sdk-py")))
-      (delete-file path))))
-
-(ert-deftest roster-claude-cli-session-p-keeps-transcripts-without-entrypoint ()
-  "Transcripts predating the `entrypoint' field must stay visible."
-  (should (roster--claude-cli-session-p '(:cwd "/tmp/x")))
-  (should (roster--claude-cli-session-p '(:entrypoint "cli")))
-  (should-not (roster--claude-cli-session-p '(:entrypoint "sdk-py"))))
-
-(ert-deftest roster-claude-load-sessions-omits-agent-sdk-transcripts ()
-  "Headless SDK runs land beside real sessions but are not resumable."
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (roster-claude-use-agent-sdk nil)
-         (session-dir (expand-file-name "projects/-tmp-proj" root)))
-    (unwind-protect
-        (progn
-          (make-directory session-dir t)
-          (with-temp-file (expand-file-name "cc-cli.jsonl" session-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Typed prompt\"}}\n")))
-          (with-temp-file (expand-file-name "cc-sdk.jsonl" session-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"sdk-py\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Review this change\"}}\n")))
-          (let ((sessions (roster--claude-load-sessions t)))
-            (should (equal (mapcar (lambda (s) (plist-get s :id)) sessions)
-                           '("cc-cli")))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-load-sessions-ignores-subagent-transcripts ()
-  "Task-tool subagents live under <session-id>/subagents/ and are not sessions."
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (roster-claude-use-agent-sdk nil)
-         (session-dir (expand-file-name "projects/-tmp-proj" root))
-         (subagent-dir (expand-file-name "cc-1/subagents" session-dir)))
-    (unwind-protect
-        (progn
-          (make-directory subagent-dir t)
-          (with-temp-file (expand-file-name "cc-1.jsonl" session-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Typed prompt\"}}\n")))
-          (with-temp-file (expand-file-name "agent-abc.jsonl" subagent-dir)
-            (insert (concat
-                     "{\"type\":\"user\",\"entrypoint\":\"cli\",\"cwd\":\"/tmp/proj\","
-                     "\"message\":{\"content\":\"Subagent prompt\"}}\n")))
-          (let ((sessions (roster--claude-load-sessions t)))
-            (should (equal (mapcar (lambda (s) (plist-get s :id)) sessions)
-                           '("cc-1")))))
-      (delete-directory root t))))
-
-(ert-deftest roster-claude-find-transcript-ignores-subagent-transcripts ()
-  "A delete or rename must never reach a subagent transcript by name."
-  (let* ((root (make-temp-file "roster-claude-root-" t))
-         (roster-claude-dir root)
-         (session-dir (expand-file-name "projects/-tmp-proj" root))
-         (subagent-dir (expand-file-name "cc-1/subagents" session-dir)))
-    (unwind-protect
-        (progn
-          (make-directory subagent-dir t)
-          (with-temp-file (expand-file-name "cc-1.jsonl" session-dir) (insert "{}\n"))
-          (with-temp-file (expand-file-name "agent-abc.jsonl" subagent-dir) (insert "{}\n"))
-          (should (equal (roster--claude-find-transcript "cc-1")
-                         (expand-file-name "cc-1.jsonl" session-dir)))
-          (should-not (roster--claude-find-transcript "agent-abc")))
-      (delete-directory root t))))
+  (let ((roster-enabled-tools '(opencode claude)))
+    (roster-claude-test-with-root
+      (cl-letf (((symbol-function 'roster--opencode-load-sessions)
+                 (lambda (&optional _)
+                   (list (list :id "oc_1" :title "OpenCode Title"
+                               :directory "/tmp/opencode" :project-id "proj_1"
+                               :time-updated 1700000000000 :tool 'opencode))))
+                ((symbol-function 'roster--claude-sdk-call)
+                 (lambda (&rest _)
+                   (roster-claude-test-sdk-result
+                    (list :id "cc-1" :title "Claude title"
+                          :directory "/tmp/claude"
+                          :time_updated 1800000000000)))))
+        (let ((sessions (roster--load-sessions)))
+          (should (equal (mapcar (lambda (s) (plist-get s :tool)) sessions)
+                         '(claude opencode)))
+          (should (equal (mapcar #'roster--session-title sessions)
+                         '("Claude title" "OpenCode Title"))))))))
 
 (provide 'roster-claude-test)
 

@@ -26,8 +26,8 @@ find . -name '*.elc' -delete
 echo "[5/7] Checkdoc"
 ./scripts/check-checkdoc.sh
 
-echo "[6/7] Check Python bridge"
-./scripts/check-python.sh
+echo "[6/7] Check Node bridge"
+./scripts/check-node.sh
 
 echo "[7/7] Package lint + tests"
 ./scripts/check-package-lint.sh
