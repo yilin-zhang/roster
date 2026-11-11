@@ -30,6 +30,8 @@
 ;; session API, called via a small Node bridge.  The SDK lives in a local
 ;; npm prefix installed by `roster-claude-install-sdk'.  Archive has no
 ;; native equivalent, so roster keeps it in a sidecar file per session.
+;; Renaming also writes the `agent-name' entry the CLI's `/rename' writes,
+;; and is refused while a Claude Code process has the session open.
 
 (defconst roster--claude-package-dir
   (file-name-directory (or load-file-name buffer-file-name))

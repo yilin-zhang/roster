@@ -205,6 +205,56 @@ Subagent transcripts nested under a session directory are never consulted."
                      '(("rename" "cc-cli" "Renamed")
                        ("delete" "cc-cli")))))))
 
+(ert-deftest roster-claude-bridge-renames-like-cli ()
+  "Renaming writes the CLI's `agent-name' entry after the SDK's title.
+Renaming or deleting a session held by a running Claude Code process is
+refused, while a registry entry whose pid now belongs to another process
+is ignored."
+  (skip-unless (executable-find roster-claude-node-command))
+  (roster-claude-test-with-root
+    (let* ((roster-claude-sdk-directory (expand-file-name "sdk" root))
+           (package-dir (expand-file-name
+                         "node_modules/@anthropic-ai/claude-agent-sdk"
+                         roster-claude-sdk-directory))
+           (project-dir (expand-file-name "projects/-tmp-proj" root))
+           (sessions-dir (expand-file-name "sessions" root))
+           (transcript (expand-file-name "cc-cli.jsonl" project-dir))
+           (log (expand-file-name "calls.jsonl" root))
+           (process-environment
+            (cons (concat "ROSTER_FAKE_SDK_LOG=" log) process-environment)))
+      (make-directory package-dir t)
+      (make-directory project-dir t)
+      (make-directory sessions-dir t)
+      (with-temp-file (expand-file-name "package.json" package-dir)
+        (insert "{\"name\":\"@anthropic-ai/claude-agent-sdk\","
+                "\"type\":\"module\",\"exports\":{\".\":\"./sdk.mjs\"}}"))
+      (with-temp-file (expand-file-name "sdk.mjs" package-dir)
+        (insert roster-claude-test-fake-sdk))
+      (with-temp-file transcript
+        (insert "{\"type\":\"user\",\"entrypoint\":\"cli\"}\n"))
+      ;; Emacs itself stands in for the running CLI.
+      (with-temp-file (expand-file-name "1.json" sessions-dir)
+        (insert (format "{\"pid\":%d,\"sessionId\":\"cc-cli\"}" (emacs-pid))))
+      (let ((err (should-error (roster--claude-rename-session
+                                '(:id "cc-cli") "Busy")
+                               :type 'user-error)))
+        (should (string-match-p "/rename" (error-message-string err))))
+      (should-error (roster--claude-delete-session '(:id "cc-cli"))
+                    :type 'user-error)
+      (should-not (file-exists-p log))
+      (with-temp-file (expand-file-name "1.json" sessions-dir)
+        (insert (format "{\"pid\":%d,\"sessionId\":\"cc-cli\",%s}"
+                        (emacs-pid)
+                        "\"procStart\":\"Thu Jan  1 00:00:00 1970\"")))
+      (roster--claude-rename-session '(:id "cc-cli") " Renamed ")
+      (should (file-exists-p log))
+      (should (equal (roster--read-json
+                      (car (last (with-temp-buffer
+                                   (insert-file-contents transcript)
+                                   (split-string (buffer-string) "\n" t)))))
+                     '(:type "agent-name" :agentName "Renamed"
+                             :sessionId "cc-cli"))))))
+
 (ert-deftest roster-claude-bridge-reports-missing-sdk ()
   (skip-unless (executable-find roster-claude-node-command))
   (roster-claude-test-with-root
