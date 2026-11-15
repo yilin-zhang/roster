@@ -31,13 +31,11 @@ directory is managed by a package manager and replaced on upgrade.
 
 ## Installation
 
-Clone this repository somewhere on your Emacs `load-path`, then configure it
-with `use-package`:
+Install it from GitHub with `use-package`:
 
 ```elisp
 (use-package roster
-  :ensure nil
-  :load-path "~/.emacs.d/site-lisp/roster/"
+  :vc (:url "https://github.com/yilin-zhang/roster" :rev :newest)
   :commands (roster roster-project))
 ```
 
@@ -51,8 +49,7 @@ new sessions open:
 
 ```elisp
 (use-package roster
-  :ensure nil
-  :load-path "~/.emacs.d/site-lisp/roster/"
+  :vc (:url "https://github.com/yilin-zhang/roster" :rev :newest)
   :commands (roster roster-project)
   :custom
   (roster-enabled-tools '(opencode claude codex pi))
