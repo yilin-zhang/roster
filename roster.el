@@ -2,7 +2,7 @@
 
 ;; Author: Yilin Zhang
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: tools, convenience
 ;; URL: https://github.com/yilin-zhang/roster
 
@@ -17,7 +17,7 @@
 ;; Each backend module owns its storage, commands, mutations, and display metadata.
 ;; `roster.el' consumes those capabilities through the registry in `roster-core'.
 ;;
-;; Requires Emacs 29.1+ for built-in SQLite support (sqlite.el).
+;; Requires Emacs 30.1+.
 
 ;;; Code:
 

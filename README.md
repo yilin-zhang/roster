@@ -10,7 +10,7 @@ other child sessions do not clutter the list.
 
 ## Requirements
 
-- Emacs 29.1 or newer
+- Emacs 30.1 or newer
 - At least one supported coding agent installed and configured
 - macOS when using the built-in Ghostty or iTerm launchers
 
