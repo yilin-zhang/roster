@@ -162,7 +162,7 @@ without arguments; entries whose predicate returns nil are omitted."
   :type 'boolean
   :group 'roster)
 
-(defcustom roster-enabled-tools '(opencode claude codex pi)
+(defcustom roster-enabled-tools '(opencode claude codex pi antigravity)
   "List of registered backend symbols whose sessions roster shows."
   :type '(repeat symbol)
   :group 'roster)

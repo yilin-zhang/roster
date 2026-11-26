@@ -8,10 +8,12 @@
 
 ;;; Commentary:
 
-;; Roster manages AI coding sessions for OpenCode, Claude Code, Codex, and pi inside Emacs.
+;; Roster manages AI coding sessions for OpenCode, Claude Code, Codex, pi, and
+;; Antigravity CLI inside Emacs.
 ;;
 ;; Sessions from all tools are shown in a unified `tabulated-list-mode' buffer
-;; tagged "OC" (OpenCode), "CC" (Claude Code), "CX" (Codex), or "PI" (pi).  Supported operations:
+;; tagged "OC" (OpenCode), "CC" (Claude Code), "CX" (Codex), "PI" (pi), or
+;; "AG" (Antigravity CLI).  Supported operations:
 ;;   resume, rename, archive/unarchive, delete, and directory moves (OpenCode only).
 ;;
 ;; Each backend module owns its storage, commands, mutations, and display metadata.
@@ -26,6 +28,7 @@
 (require 'roster-claude)
 (require 'roster-codex)
 (require 'roster-pi)
+(require 'roster-antigravity)
 
 ;;; Tool helpers
 

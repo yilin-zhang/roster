@@ -202,6 +202,16 @@
     (should (equal (aref columns 1) "PI"))
     (should (equal (aref columns 2) "ACTIVE"))))
 
+(ert-deftest roster-entry-shows-antigravity-tag ()
+  (let* ((session '(:id "ag_1"
+                        :title "My Antigravity Session"
+                        :directory "/tmp/proj"
+                        :time-updated 1700000000000
+                        :tool antigravity))
+         (columns (cadr (roster--entry session))))
+    (should (equal (aref columns 1) "AG"))
+    (should (equal (aref columns 2) "ACTIVE"))))
+
 ;;; Tool dispatch
 
 (ert-deftest roster-custom-backend-uses-registered-capabilities ()

@@ -6,6 +6,7 @@
 (require 'roster-claude-test)
 (require 'roster-codex-test)
 (require 'roster-pi-test)
+(require 'roster-antigravity-test)
 (require 'roster-ui-test)
 
 (provide 'roster-test)

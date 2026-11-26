@@ -1,8 +1,8 @@
 # Roster
 
 Roster is an Emacs interface for browsing and managing coding-agent sessions.
-It brings OpenCode, Claude Code, Codex, and pi sessions into one searchable,
-sortable list.
+It brings OpenCode, Claude Code, Codex, pi, and Antigravity CLI sessions into
+one searchable, sortable list.
 
 From that list you can resume, rename, archive, delete, or open a session's
 working directory. Roster shows root sessions only, so Codex subagents and
@@ -52,7 +52,7 @@ new sessions open:
   :vc (:url "https://github.com/yilin-zhang/roster" :rev :newest)
   :commands (roster roster-project)
   :custom
-  (roster-enabled-tools '(opencode claude codex pi))
+  (roster-enabled-tools '(opencode claude codex pi antigravity))
   (roster-default-new-session-tool 'opencode)
   (roster-terminal-function #'roster-open-in-ghostty))
 ```
@@ -101,19 +101,23 @@ and why.
 
 ## Supported tools
 
-| Tool        | Tag  | Resume | Rename | Archive | Delete | Move directory |
-|-------------|------|--------|--------|---------|--------|----------------|
-| OpenCode    | `OC` | Yes    | Yes    | Yes     | Yes    | Yes            |
-| Claude Code | `CC` | Yes    | Yes    | Yes     | Yes    | No             |
-| Codex       | `CX` | Yes    | Yes    | Yes     | Yes    | No             |
-| pi          | `PI` | Yes    | Yes    | Yes     | Yes    | No             |
+| Tool            | Tag  | Resume | Rename | Archive | Delete | Move directory |
+|-----------------|------|--------|--------|---------|--------|----------------|
+| OpenCode        | `OC` | Yes    | Yes    | Yes     | Yes    | Yes            |
+| Claude Code     | `CC` | Yes    | Yes    | Yes     | Yes    | No             |
+| Codex           | `CX` | Yes    | Yes    | Yes     | Yes    | No             |
+| pi              | `PI` | Yes    | Yes    | Yes     | Yes    | No             |
+| Antigravity CLI | `AG` | Yes    | No     | Yes     | Yes    | No             |
 
 Roster prefers each tool's public management surface.  Codex uses app-server;
-OpenCode uses its local HTTP server; Claude uses Agent SDK; and pi follows its
-published `SessionManager` file contract.  Archive remains Roster-only for
-Claude and pi because neither tool exposes that concept.  Deleting a Claude
-session is permanent: the SDK removes its transcript and subagent transcripts
-rather than moving them to the trash.
+OpenCode uses its local HTTP server; Claude uses Agent SDK; pi follows its
+published `SessionManager` file contract; and Antigravity CLI lists sessions
+through its `agy acp` stdio server.  Because Antigravity ACP does not yet expose
+session mutations, delete removes the local session files and cached index
+entries after checking `presence/<id>.lock`, archive remains Roster-only (as for
+Claude and pi), and rename is unsupported until a public API is available.
+Deleting a Claude or Antigravity session is permanent rather than moving it to
+the trash.
 OpenCode 1.18 can archive but cannot unarchive over HTTP, so only that operation
 temporarily retains an isolated SQLite compatibility path.
 
